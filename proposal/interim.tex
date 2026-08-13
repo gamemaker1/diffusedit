@@ -1,0 +1,51 @@
+\documentclass[11pt]{article}
+
+\usepackage[preprint]{acl}
+
+\usepackage{times}
+\usepackage{latexsym}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+
+\title{DiffusEdit: Interim Proposal}
+
+\author{
+  \textbf{Tatva Agarwal\textsuperscript{*}} \\ 2024117005 \And
+  \textbf{Vedant Kulkarni\textsuperscript{*}} \\ 2024101140 \And
+  \textbf{Byasani Vedavyas\textsuperscript{*}} \\ 2024101025 \And
+  \textbf{Venya Velmurugan\textsuperscript{*}} \\ 2024114002
+}
+
+\begin{document}
+
+\maketitle
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\footnotetext[1]{Equal contribution; authors listed alphabetically.}
+\renewcommand{\thefootnote}{\arabic{footnote}}
+\setcounter{footnote}{0}
+
+\begin{abstract}
+Updating documents by hand with the latest available information is a task that requires a lot of human effort. This project attempts to tackle this problem by identifying stale spans of text in a document given the latest information, masking the tokens that make up these stale spans, and re-generating them using a Diffusion Model. This project is built on top of two similar papers: a pre-print titled Detect, Remask, Repair \citep{zou-etal-2026-detect} and a publication titled FRUIT \citep{iv-etal-2022-fruit}.
+\end{abstract}
+
+\section{Introduction}
+
+% https://github.com/tchewik/isanlp_rst
+% https://github.com/google-research/language/blob/master/language/fruit/README_PIPELINE.md
+
+\bibliography{citations}
+
+% \appendix
+
+% \section{Example Appendix}
+% \label{sec:appendix}
+
+% This is an appendix.
+
+\end{document}
