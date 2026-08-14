@@ -39,6 +39,14 @@ Updating documents by hand with the latest available information is a task that 
 % https://github.com/tchewik/isanlp_rst
 % https://github.com/google-research/language/blob/master/language/fruit/README_PIPELINE.md
 
+Updating documents and articles by hand for the latest available information is a time taking task which requires significant human effort. This primarily comes to the challenge of ensuring the updates are applied in a symantic and consistent manner to prevent mixing of stale and current information. 
+
+Autoregressive models and Full LLM generation require the entire text to be re-written, which reduces accuracy and introduces latency. This is where Diffusion models come in, The relevant sections which are to be edited are masked out and then a diffusion model is run on them to generate repair them with new data. This leads to low latency edits. 
+
+\citep{zou-etal-2026-detect} does this for single paragraphs, using a diffusion model. 
+
+We propose a method to retain context across an entire document and be able to edit the document in the 
+
 \bibliography{citations}
 
 % \appendix
