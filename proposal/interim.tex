@@ -31,29 +31,24 @@
 \setcounter{footnote}{0}
 
 \begin{abstract}
-Updating documents by hand with the latest available information is a task that requires a lot of human effort. This project attempts to tackle this problem by identifying stale spans of text in a document given the latest information, masking the tokens that make up these stale spans, and re-generating them using a Diffusion Model. This project is built on top of two similar papers: a pre-print titled Detect, Remask, Repair \citep{zou-etal-2026-detect} and a publication titled FRUIT \citep{iv-etal-2022-fruit}.
+Articles frequently go out of date as more evidence becomes available, and manually updating them takes considerable effort. Regenerating the article from scratch reduces that effort, but rewrites parts that remain correct and makes it difficult to pinpoint the exact changes. Instead, editing the article in-place -- locating stale spans of text, masking the tokens that make up the span, and infilling the masked tokens using diffusion models -- makes minimal changes and avoids regenerating text that has not changed. This project extends the pre-print Detect, Remask, Repair \citep{zou-etal-2026-detect}, using data from the publication FRUIT \citep{iv-etal-2022-fruit}. We address cascading edits, where a span of text goes stale without being contradicted by new evidence, simply because a different span changed.
 \end{abstract}
 
-\section{Introduction}
+\section{Background}
 
-% https://github.com/tchewik/isanlp_rst
-% https://github.com/google-research/language/blob/master/language/fruit/README_PIPELINE.md
+Detect, Remask, Repair \citep{zou-etal-2026-detect} produces an updated summary from a stale one by scoring each of its tokens for staleness with \textsc{[mask]-disc}, a linear classification head over the hidden states of a frozen diffusion model, masking the highest-scoring tokens, and infilling them. FRUIT \citep{iv-etal-2022-fruit}, uses autoregressive language models to produce an updated article from an outdated one given new evidence, and provides us with a dataset of outdated and updated Wikipedia articles along with evidence that supports each change.
 
-Updating documents and articles by hand for the latest available information is a time taking task which requires significant human effort. This primarily comes to the challenge of ensuring the updates are applied in a symantic and consistent manner to prevent mixing of stale and current information. 
+We extend \citet{zou-etal-2026-detect} from one or two-sentence summaries to two or three-paragraph articles, where a span can go stale simply because another span changed. For example, an article may report that three people died in a fire and that the small death toll limited the political fallout. However, evidence revising the toll to forty-two contradicts the first figure but says nothing about the fallout, which is now wrong. We therefore update the article iteratively rather than in a single pass, and add the ability to delete a sentence, which infilling alone cannot do.
 
-Autoregressive models and Full LLM generation require the entire text to be re-written, which reduces accuracy and introduces latency. This is where Diffusion models come in, The relevant sections which are to be edited are masked out and then a diffusion model is run on them to generate repair them with new data. This leads to low latency edits. 
+\section{Method}
+We concatenate the evidences and the original article, in that order, and pass them through a frozen diffusion model. The resulting hidden state vectors are cached and reused by every subsequent step, so the large model is invoked once per article rather than once per round. For each sentence, we average the hidden state vectors of its tokens into a single vector. We then pass this single vector to a linear classification layer trained on the articles from FRUIT \citep{iv-etal-2022-fruit} to classify the sentence as \textsc{keep}, \textsc{edit}, or \textsc{drop}.
 
-\citep{zou-etal-2026-detect} does this for single paragraphs, using a diffusion model. 
+Sentences classified as \textsc{drop} are deleted from the original article, while sentences classified as \textsc{keep} are left as they are. Within each sentence classified \textsc{edit}, we apply \textsc{[mask]-disc} to the hidden state vectors of each token, assigning each a staleness score to find which tokens need to be updated. The tokens with a high staleness score are subsequently masked. The diffusion model then infills the masked positions, conditioned on the evidence and on the unmasked remainder of the article. Since each masked position is filled by exactly one token, the number of masks we open fixes the length of the replacement in advance, and a correct replacement is not always the same length as the span it replaces. We therefore infill each masked span at several candidate lengths and keep the best completion.
 
-We propose a method to retain context across an entire document and be able to edit the document in the 
+Repairing one span may leave others stale, so once infilling is complete we identify the sentences that must now be edited or deleted. We compare three ways to do this: (a) marking sentences sharing a named entity, number, or date with the span we have just repaired, (b) re-applying \textsc{[mask]-disc} and marking tokens whose staleness score is higher than in the previous round, since a token that is more stale after an update is one that the update has undermined, or (c) using a small network -- trained on pairs of sentences in which the first sentence is directly contradicted by the evidence and the second is consequential -- that takes the pooled vectors of two sentences and predicts whether the second needs to be changed given that the first has changed.
+
+Sentences marked in this way are treated as \textsc{edit} sentences and returned to the \textsc{[mask]-disc} step. This continues until no new sentences or tokens are marked or classified as \textsc{edit}. To prevent an infinite loop, we limit the number of rounds, as well as the number of times a particular token can be masked.
 
 \bibliography{citations}
-
-% \appendix
-
-% \section{Example Appendix}
-% \label{sec:appendix}
-
-% This is an appendix.
 
 \end{document}
