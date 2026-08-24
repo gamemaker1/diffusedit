@@ -1,0 +1,7 @@
+1) UpdateROUGE (computes rouge only on the updated sentences) - FRUIT
+2) We can use SARI: We reward addition operations, where system out- put O was not in the input I but occurred in any of the references R, i.e. O ∩ I ∩ R. We define n-gram precision p(n) and recall r(n) for addition operations.[https://aclanthology.org/Q16-1029.pdf]
+3)ALIGNSCORE: this is for the factual consistency [https://arxiv.org/pdf/2305.16739] the issue is its 355M parameter model might be slow :(
+4)For the faithfulness FRUIT is Unsupported Entity Tokens which is number of tokens not present in the source article or evidence, this is bad i feel because words with same meaning can be there
+5)LLM as a judge is good GPT-4o, 3.5 sonnet or something like these (need to check the token limits)
+6)GLEU and BLEU
+
