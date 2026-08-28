@@ -1,0 +1,19 @@
+\begin{tikzpicture}[
+  node distance=2mm,
+  box/.style={draw, rounded corners=1pt, align=center, font=\small, inner sep=3pt, minimum width=5.2cm},
+  >={Stealth[length=2mm]}
+]
+\node[box] (input) {Evidence $E$ $\oplus$ current article};
+\node[box, below=of input] (model) {Frozen diffusion model\\[-1pt] {\scriptsize Forward pass $\rightarrow$ hidden states $h_1, \dots, h_L$}};
+\node[box, below=of model] (cls) {Classify each sentence\\[-1pt] {\scriptsize \keep{} / \edit{} / \drop{} head on pooled $u_j$}};
+\node[box, below=of cls] (mask) {Mask stale tokens in \edit{} sentences\\[-1pt] {\scriptsize Token scores $\pi_i \ge \tau$ merge into spans}};
+\node[box, below=of mask] (infill) {Infill each span at lengths $\Lambda(\ell)$\\[-1pt] {\scriptsize Keep the candidate maximizing $R(c)$}};
+\node[box, below=of infill] (casc) {Cascade detector flags broken sentences\\[-1pt] {\scriptsize Flagged sentences become \edit{} next round}};
+\draw[->] (input) -- (model);
+\draw[->] (model) -- (cls);
+\draw[->] (cls) -- (mask);
+\draw[->] (mask) -- (infill);
+\draw[->] (infill) -- (casc);
+\draw[->] (casc.east) -- ++(5mm,0) |- (model.east)
+  node[pos=0.25, right, font=\scriptsize, align=left] {Next round\\($\le R$ rounds)};
+\end{tikzpicture}
