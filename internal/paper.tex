@@ -1,0 +1,479 @@
+\documentclass[]{paper}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newcommand{\mask}{\ensuremath{\mathrm{m}}}
+\newcommand{\keep}{\textsc{keep}}
+\newcommand{\edit}{\textsc{edit}}
+\newcommand{\drop}{\textsc{drop}}
+\newcommand{\maskdisc}{\textsc{[mask]-disc}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\ind}[1]{\mathbf{1}\!\left[#1\right]}
+
+\begin{document}
+
+\title{DiffusEdit: Technical Design}
+
+\author[*]{Tatva Agarwal}
+\author[*]{Vedant Kulkarni}
+\author[*]{Byasani Vedavyas}
+\author[*]{Venya Velmurugan}
+
+\affiliation[]{IIIT Hyderabad}
+
+\contribution[*]{Equal contribution; authors listed alphabetically.}
+
+\abstract{
+Reference articles go out of date as events develop, and updating them by hand is slow. Asking a language model to write a fresh article automates the update, but it rewrites text that was already correct and leaves no record of what changed. DiffusEdit instead edits the article in place. Small trained layers, reading the hidden states of a frozen masked diffusion language model, decide which sentences to keep, edit, or delete, and which tokens inside them are stale. The frozen model rewrites only the stale positions, and the system repeats the process on sentences that the rewrites themselves made wrong. Training labels come from pairs of Wikipedia snapshots, and evaluation measures update quality, faithfulness to the evidence, closeness to the original article, and coverage of the forced secondary edits. This document details the proposed technical design of the project. Every numeric value in this document is a starting point for validation rather than a final choice.
+}
+
+\date{August 28, 2026}
+\correspondence{\email{vedant.kulkarni@students.iiit.ac.in}}
+
+\maketitle
+\section{Introduction}
+\label{sec:intro}
+
+Reference text goes out of date. A Wikipedia article about a factory fire may say that three people died and that the small death toll limited the political fallout. A week later, news reports revise the toll to forty-two. The first sentence is now wrong in an obvious way, because the evidence contradicts it directly. The second sentence is wrong in a quieter way. No news report mentions political fallout at all, yet the sentence rests on a fact that no longer holds. An editor who fixes the death toll and stops has left the article internally inconsistent. We call the second kind of required change a \emph{cascading edit}, a sentence that must change only because another sentence changed.
+
+Keeping such articles current by hand is slow. The editor must read the incoming evidence, find every affected sentence, rewrite each one without disturbing the rest, and then re-read the article for sentences that the rewrites broke. DiffusEdit automates this process. Given the outdated article and the new evidence, it outputs an updated article, and it aims to change as little text as possible along the way.
+
+The standard automated alternative is to hand the article and the evidence to a language model and ask it to write a fresh article. This works, but it has two costs. First, text that was already correct gets rewritten, and rewriting is risky, because models sometimes introduce errors into sentences that needed no change. Second, the output carries no record of what changed, so a human reviewer must compare the old and new articles line by line. DiffusEdit avoids both costs by editing in place, so correct text survives verbatim and the changed positions are known exactly because the system chose them.
+
+The rest of this document builds the system up from its parts. \Cref{sec:background} introduces the machine learning background: tokens, language models, masked diffusion models, hidden states, and classifiers. Readers who know these topics can skim it and pick up the notation. \Cref{sec:problem} states the task precisely, and \Cref{sec:related} places the design among existing systems. \Cref{sec:overview} walks through the system once at a high level. \Cref{sec:heads,sec:inference} give the full technical detail of the scoring components and the edit loop. \Cref{sec:data} explains where the training data comes from and how we label it. \Cref{sec:eval} explains how we will measure success, starting from what precision and recall mean. \Cref{sec:risks} lists possible failures and how we would deal with them.
+
+\section{Background}
+\label{sec:background}
+
+\subsection{Tokens and Language Models}
+\label{sec:lm}
+
+Neural networks that process text first split it into \emph{tokens}, short pieces, usually a word or part of a word, drawn from a fixed list called the \emph{vocabulary}. A vocabulary $V$ typically holds on the order of a hundred thousand tokens. The sentence \emph{Three people died in the fire} might become the seven tokens (Three, people, died, in, the, fire, .). From here on, a piece of text and its token sequence are interchangeable.
+
+A \emph{language model} is a neural network that assigns probabilities to tokens. Given some visible text, it outputs, for a position of interest, a number between zero and one for every vocabulary entry, and the numbers sum to one across the vocabulary. A high number on a token means the model considers that token likely at that position. Training such a model means showing it a vast quantity of real text and adjusting its internal weights so that the probability it assigns to the text it sees goes up. The result is a model that has absorbed the patterns of its training text: grammar, facts, style, and the statistics of which words follow which.
+
+Most familiar language models are \emph{autoregressive}, meaning they generate text left to right, choosing one token at a time, each choice conditioned only on the tokens to its left. This design generates fluent text, but it fits editing poorly. If we want to rewrite three tokens in the middle of a paragraph, an autoregressive model gives us no direct way to condition on the text that comes \emph{after} the gap, because it never learned to look rightward.
+
+\subsection{Masked Diffusion Language Models}
+\label{sec:mdlm}
+
+A \emph{masked diffusion language model} learns a different skill, filling in blanks. During training, some fraction of the tokens in a text are replaced by a placeholder symbol, written \mask{} and called the \emph{mask}. The model sees the partially masked text and must predict the original token at every masked position, using the visible tokens on \emph{both} sides. Corrupting text with masks and learning to undo the corruption is the idea behind the name. Masking plays the role of noise, and the model learns to reverse it, in loose analogy with diffusion models for images. LLaDA \citep{nie-etal-2025-llada} is the model we build on. Dream \citep{ye-etal-2025-dream} is a drop-in alternative.
+
+Formally, let $x_0 = (x_0^1, \dots, x_0^L)$ be a text of $L$ tokens. The corruption process picks a noise level $t$ between zero and one, then replaces each token independently by \mask{} with probability $t$:
+\begin{equation}
+q\!\left(x_t \mid x_0\right) \;=\; \prod_{i=1}^{L}
+\Big[ (1 - t)\, \ind{x_t^i = x_0^i} + t\, \ind{x_t^i = \mask} \Big].
+\label{eq:forward}
+\end{equation}
+Here $\ind{\cdot}$ equals one when the bracketed statement holds and zero otherwise, so each factor says that the token survives with probability $1 - t$ and becomes \mask{} with probability $t$. The model $p_\theta$, with weights $\theta$, learns to predict the originals at the masked spots by minimizing
+\begin{equation}
+\mathcal{L}(\theta) \;=\;
+-\,\E_{t,\, x_0,\, x_t}\!\left[
+\frac{1}{t} \sum_{i=1}^{L} \ind{x_t^i = \mask}\, \log p_\theta\!\left(x_0^i \mid x_t\right)
+\right].
+\label{eq:loss}
+\end{equation}
+Reading \Cref{eq:loss} from the inside out works as follows. For every masked position $i$, take the probability the model assigns to the true original token, and take its logarithm, so that confident correct predictions cost little and confident wrong ones cost much. Sum over the masked positions and scale by $1/t$, which balances the contributions of light and heavy corruption. The symbol $\E_{t,\, x_0,\, x_t}$ is an \emph{expectation}, an average over the random quantities named in its subscript: the noise level $t$, drawn uniformly between zero and one; the text $x_0$, drawn from the training corpus; and the corruption $x_t$, drawn from \Cref{eq:forward}. Finally, the leading minus sign turns the goal of making probabilities large into the goal of making the loss small, which is the direction gradient descent works in. Training pushes this loss down, which pushes the model's predictions toward the original text.
+
+To \emph{generate} text, one starts from a sequence that is all \mask{} and repeatedly asks the model to predict every masked position, committing the predictions it is most confident about and leaving the rest masked, over $T$ rounds until nothing is masked. To \emph{infill}, one runs the same procedure on a sequence where only chosen positions are masked. Infilling is the operation DiffusEdit relies on, since the model rewrites exactly the positions we mask while conditioning on everything around them.
+
+Every mask commits to exactly one token, a structural property that matters throughout this document. Masking five positions yields a replacement of exactly five tokens. A correct rewrite is often shorter or longer than the text it replaces, so \Cref{sec:infill} works around this constraint.
+
+Masked diffusion is not the only architecture that fits editing. An encoder-decoder model such as T5 also reads context on both sides and emits variable-length output. Two properties motivate the choice. The same frozen model supplies both the hidden states that every scoring head reads and the infilling engine, so the system contains no separately trained generator. And infilling changes only the masked positions, so untouched text survives exactly, where an encoder-decoder that re-emits a sentence may vary it. Whether these properties hold up at article scale is part of what the project tests.
+
+\subsection{Hidden States}
+\label{sec:hidden}
+
+A neural language model processes text through a stack of layers. At each layer, every token position carries a vector of numbers, and each layer transforms these vectors using the surrounding context. The vector at position $i$, taken from some layer, is the \emph{hidden state} $h_i \in \mathbb{R}^d$. For LLaDA-8B the dimension $d$ is 4096. A hidden state is a numeric summary of that token \emph{in context}. Two occurrences of the word \emph{bank} get different hidden states in \emph{river bank} and \emph{bank account}, because the surrounding words differ.
+
+Hidden states are the interface between the frozen model and everything DiffusEdit trains. We never update the weights of the language model itself. We say it stays \emph{frozen}. Instead we run one forward pass, keep the hidden states, and train small components that read them. This is standard practice under the name \emph{probing}, and it is cheap, because the expensive model runs once per input and the trainable parts are tiny.
+
+Unless stated otherwise, hidden states come from one chosen layer $\ell^\ast$. The default is the final layer. We will also try the layer at three quarters of the depth, because middle-to-late layers often carry more transferable features than the last one.
+
+\subsection{Classifiers}
+\label{sec:classifiers}
+
+A \emph{classifier} is a function that takes a vector and returns a probability for each of a fixed set of labels. The simplest useful classifier is a single linear layer. For two labels, it computes a weighted sum of the input vector's entries and squashes the result into $(0, 1)$ with the logistic function $\sigma(z) = 1 / (1 + e^{-z})$. The output reads as the probability of the positive label. For $k$ labels, it computes $k$ weighted sums and normalizes them into $k$ probabilities with the \emph{softmax} function, which exponentiates each sum and divides by the total.
+
+Training a classifier requires \emph{labels}, the answer we want for each training input. A \emph{loss function} measures the mismatch between predicted probabilities and true labels. Ours is \emph{cross-entropy}, the negative logarithm of the probability the classifier put on the correct label. Gradient descent then adjusts the classifier's weights step by step to shrink the average loss. All of this is cheap for the classifiers in this document, because each has at most a few million weights, against eight billion in the frozen language model.
+
+Data is always split three ways. The \emph{training set} fits the weights. The \emph{validation set} chooses the settings that training does not set, such as thresholds, and provides an early warning when a model memorizes its training data instead of learning the pattern, a failure called \emph{overfitting}. The \emph{test set} is touched once, at the end, to report the final numbers. A number tuned on test data no longer measures generalization, so every threshold in this document comes from validation data.
+
+\section{Task Definition}
+\label{sec:problem}
+
+An article is a sequence of sentences $A = (s_1, \dots, s_n)$. Flattening the sentences gives the token sequence $x = (x_1, \dots, x_L)$. New evidence arrives as a set of documents $E = (e_1, \dots, e_m)$. In our data these are text snippets, sometimes prose and sometimes a table rendered as text. Call the article as it should read after the update $A^\ast$. The system never sees $A^\ast$ and must produce its own updated article $\hat{A}$ from $A$ and $E$ alone.
+
+The output must balance three requirements. \emph{Faithfulness} requires every claim in $\hat{A}$ to agree with the evidence and with the untouched parts of the original article. \emph{Coverage} requires every evidence fact that bears on the article to appear in $\hat{A}$. \emph{Minimality} requires $\hat{A}$ to stay as close to $A$ as possible. Regenerating from scratch can satisfy the first two while failing minimality badly, and deleting every contested claim would satisfy faithfulness while failing coverage. We state the goal as a constrained minimization:
+\begin{equation}
+\hat{A} \;=\; \arg\min_{A'} \; d(A', A)
+\quad \text{subject to} \quad
+\mathrm{faithful}(A', E) \text{ and } \mathrm{covered}(A', E),
+\label{eq:objective}
+\end{equation}
+where $d$ counts token-level edits between two texts, $\mathrm{faithful}$ is the predicate that every claim in $A'$ agrees with $E$, and $\mathrm{covered}$ is the predicate that every evidence fact bearing on the article appears in $A'$. Neither predicate is computable. They are idealized targets, and the metrics of \Cref{sec:metrics} serve as their measurable stand-ins, AlignScore and the fact verifier for $\mathrm{faithful}$, UpdateROUGE and entity recall for $\mathrm{covered}$. One consequence for the \drop{} label follows. Deleting a sentence is the correct repair only when the evidence retracts its fact, and not when the evidence merely contradicts the current phrasing, because the corrected fact still belongs in the article under $\mathrm{covered}$. The approximation is greedy. It finds the smallest set of positions that appear to violate the constraints, rewrites only those, and repeats until nothing appears to violate them.
+
+Write $s_j \rightsquigarrow s_k$ when changing $s_j$ forces a change in $s_k$ even though the evidence says nothing about $s_k$ directly. The fire example from \Cref{sec:intro} shows the pattern, with $s_j$ the death-toll sentence and $s_k$ the fallout sentence. An editing pass guided by evidence alone repairs only sentences the evidence contradicts. A cascading edit contradicts nothing in the evidence, so sentences reachable through $\rightsquigarrow$ stay stale under any detector that scores text against the evidence. Detect, Remask, Repair \citep{zou-etal-2026-detect} is such a system, and DiffusEdit extends it from short summaries to multi-paragraph articles.
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Updating text against new evidence.}
+The oldest work in this area corrects one sentence or one claim at a time. \citet{shah-etal-2020-automatic} take a sentence that a new fact contradicts, mask the tokens that clash with the fact, and let a model fill the gap, which is the same mask-and-fill idea DiffusEdit uses inside a single sentence. \citet{thorne-vlachos-2021-evidence} do the same for short factual claims checked against retrieved evidence. \citet{chen-etal-2022-converge} reach the corrected claim step by step, making one small edit at a time until the claim agrees with the evidence. \citet{iso-etal-2020-fact} correct text against a table of facts instead of prose evidence. A related line fixes the output of language models rather than human-written articles. These systems check each claim the model generated against retrieved evidence and revise the claims that fail the check \citep{gao-etal-2023-rarr, krishna-etal-2024-genaudit}. PEER \citep{schick-etal-2022-peer} learns from Wikipedia's edit history to follow written instructions such as \emph{fix the outdated numbers}, planning and writing the edit itself. Closest to us, FRUIT \citep{iv-etal-2022-fruit} defines the exact task this project works on, updating a whole article from evidence, and its EDIT5 model writes the updated article left to right while copying unchanged sentences through special tokens. Across all of these, the editing unit is either a single sentence or the whole regenerated text. None of them marks stale tokens inside the article, and none goes back over its own edits to catch cascades.
+
+\paragraph{Edit propagation.}
+Two recent works address the cascade problem directly. EditPropBench \citep{kruthof-2026-editpropbench} is a benchmark, not a system. It plants a factual change in a synthetic scientific paper, records every downstream sentence that must change with it, and measures how many of those a model finds. The strongest prompted model tested misses about 30\% of the required follow-on changes when the dependence is implicit, so the problem is open. HiCaM \citep{shi-etal-2025-hicam} is a system. It has a large prompted model build two maps of the document, a graph of which entities affect which, and a tree of summaries at several levels of detail, and it then uses the maps to push one change through to the connected content. Both approaches call a large model many times per document. DiffusEdit instead makes the propagation decision with small trained heads reading cached hidden states (\Cref{sec:detectors}), so the expensive model stays out of that decision.
+
+\paragraph{Editing with diffusion models.}
+A growing line of work lets a diffusion model reconsider tokens it has already committed during generation. ReMDM \citep{wang-etal-2025-remasking} derives rules for putting masks back during sampling. LLaDA2.1 \citep{bie-etal-2026-llada21} overwrites committed tokens that the model would now predict differently with high confidence. \citet{yao-2026-remask} argue that overwriting is the wrong action, because a wrong committed token pulls nearby predictions in its direction while a mask pulls in no direction, so the better action is to re-mask the token and let the model predict it again from cleaner context. Two of their tools appear in DiffusEdit. Their cap on how often one position may be re-masked is our loop budget (\Cref{sec:loop}), and one of their detector variants, a token whose confidence falls as decoding proceeds, is the single-run version of our staleness delta across rounds (\Cref{sec:detectors}). Their default detector is simpler, a low absolute probability on the committed token. Another branch works on the one-token-per-mask constraint from \Cref{sec:mdlm}. DreamOn \citep{wu-etal-2026-dreamon} and DDOT \citep{zhang-etal-2025-ddot} train models whose masked region can grow or shrink while infilling, which would remove the need for our candidate lengths but requires training the diffusion model, and our design keeps it frozen. All of these fix mistakes the model makes while generating fresh text. Detect, Remask, Repair \citep{zou-etal-2026-detect} is the one prior system that applies a diffusion model to existing text and external evidence, and it is the system DiffusEdit extends.
+
+\paragraph{Knowledge editing.}
+A different research line updates the model instead of the text. There, an outdated fact lives inside a model's weights, and editing means changing those weights so the model recalls the new fact \citep{meng-etal-2022-rome}. In DiffusEdit, the article carries the outdated fact, the article is what gets corrected, and every network in the system keeps its weights fixed.
+
+\section{System Overview}
+\label{sec:overview}
+
+DiffusEdit runs in rounds. Each round has four stages, and every stage reads the hidden states of one frozen-model forward pass over the evidence and the current article.
+
+\begin{enumerate}
+\item \emph{Classify.} A sentence classifier labels every sentence \keep{} (leave it alone), \edit{} (some of its tokens must change), or \drop{} (delete the whole sentence). Deletion needs its own label because infilling replaces tokens but cannot remove them.
+\item \emph{Mask.} Inside each \edit{} sentence, a token-level detector scores every token for staleness, and tokens scoring above a threshold become \mask{}.
+\item \emph{Infill.} The frozen diffusion model fills the masked spans, conditioned on the evidence and on all the unmasked text. Each span is tried at several replacement lengths, and the best-scoring completion wins.
+\item \emph{Cascade.} A cascade detector looks at what just changed and flags sentences elsewhere in the article that the changes may have broken. Flagged sentences enter the next round as \edit{} sentences.
+\end{enumerate}
+
+The loop ends when a round flags nothing new, or when budget caps stop it (\Cref{sec:loop}).
+
+On the fire example, round one classifies the death-toll sentence \edit{} because the evidence contradicts it, masks the token \emph{three}, and infills \emph{forty-two}. The classifier leaves the fallout sentence as \keep{} in round one, since no evidence mentions it. After the repair, the cascade detector flags the fallout sentence, because it shares content with a sentence that just changed. Round two masks the now-unsupported phrase about a small death toll limiting the fallout and rewrites it. Round three flags nothing, and the loop ends.
+
+Three small trained components make the decisions: the sentence classifier, the token staleness detector, and one variant of the cascade detector. \Cref{sec:heads} specifies them. The loop logic and the infilling machinery around the frozen model follow in \Cref{sec:inference}.
+
+\section{Scoring Heads}
+\label{sec:heads}
+
+We call each small trained component a \emph{head}, a small network that reads the frozen model's hidden states. This section gives each head's input, output, architecture, and training objective. Training data for all of them comes from \Cref{sec:data}.
+
+\subsection{Sentence Pooling}
+\label{sec:pooling}
+
+Heads that judge whole sentences need one vector per sentence, but the model produces one per token. We average the token vectors. For sentence $s_j$ covering token positions $\mathcal{I}_j$,
+\begin{equation}
+u_j \;=\; \frac{1}{|\mathcal{I}_j|} \sum_{i \in \mathcal{I}_j} h_i .
+\label{eq:pool}
+\end{equation}
+Averaging vectors keeps what the token vectors agree on and washes out position-specific detail. This is \emph{mean pooling}. If validation results are poor, the fallback is \emph{attention pooling}, where a learned query vector decides how much each token contributes instead of weighting all tokens equally.
+
+\subsection{Sentence Classifier}
+\label{sec:cls}
+
+The sentence classifier is a linear layer mapping the pooled vector $u_j$ from \Cref{eq:pool} to three probabilities:
+\begin{equation}
+p_j \;=\; \mathrm{softmax}\!\left(W_c\, u_j + b_c\right),
+\qquad W_c \in \mathbb{R}^{3 \times d},
+\label{eq:cls}
+\end{equation}
+one probability each for \keep{}, \edit{}, and \drop{}. For \keep{} and \edit{}, the predicted label is the arg-max. \drop{} is held to a stricter rule, because later rounds cannot undo a deletion. The system cannot insert sentences, so a wrong deletion is permanent. A sentence is deleted only when its \drop{} probability clears a separate confidence gate $\tau_d$, tuned on validation, and a sentence that favors \drop{} without clearing the gate is treated as \edit{} instead. Revision history also deletes sentences for restructuring and style, so the derived \drop{} labels are broader than the retraction rule of \Cref{sec:problem}. The gate absorbs part of that mismatch, and the label audit (\Cref{sec:labels}) records how often a derived \drop{} is a genuine retraction.
+
+Most sentences in a real update are \keep{}, since FRUIT articles average three to four updated sentences out of roughly ten (\Cref{sec:fruit}). A classifier trained on skewed labels learns a shortcut. It predicts the common class for every input, which scores well on the skewed label distribution while carrying no information. The standard fix is to make rare-class mistakes cost more. With $N$ training sentences of which $N_c$ carry class $c$, the weighted cross-entropy loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{cls}} \;=\;
+-\sum_{j} \omega_{y_j}\, \log p_j[y_j],
+\qquad
+\omega_c \;=\; \frac{N}{3\, N_c},
+\end{equation}
+where $y_j$ is the true label of sentence $j$ and $p_j[y_j]$ is the probability the classifier gave it. The weight $\omega_c$ grows as class $c$ gets rarer, so the classifier cannot reach a low loss by ignoring \edit{} and \drop{}.
+
+\subsection{Token Staleness Scoring}
+\label{sec:tokenhead}
+
+Inside each \edit{} sentence we need to know \emph{which} tokens to mask. The token scorer, following the \maskdisc{} detector of \citet{zou-etal-2026-detect}, is a linear layer with a sigmoid output on each token's hidden state:
+\begin{equation}
+\pi_i \;=\; \sigma\!\left(w_d^\top h_i + b_d\right),
+\label{eq:token}
+\end{equation}
+read as the probability that token $i$ is stale. It trains with binary cross-entropy, the two-class version of the loss from \Cref{sec:classifiers}, against stale-or-not labels from two sources.
+
+\begin{enumerate}
+\item \emph{Derived labels.} \Cref{sec:labels} aligns each outdated article with its corrected version and diffs aligned sentence pairs token by token. Tokens that the real revision replaced or removed are labeled stale.
+\item \emph{Synthetic corruptions.} Real labeled data is finite and noisy, so we manufacture more, following \citet{zou-etal-2026-detect}. Take a correct article. Sample a corruption fraction $t$ uniformly from $[0.3, 0.7]$, mask that fraction of its tokens, and let the frozen model refill the masked spots while conditioning on the \emph{outdated} evidence. The refilled tokens are fluent but often unsupported, exactly the failure mode the detector must catch at inference time. Label a refilled token stale when it differs from the original. This yields unlimited training pairs whose error distribution matches the errors our own repair stage produces.
+\end{enumerate}
+
+The mixing ratio between the two sources is an experiment axis (\Cref{sec:ablations}). The default is an even mix.
+
+\subsection{Consequence Prediction}
+\label{sec:conshead}
+
+The third head supports cascade detection. It answers a yes-or-no question about an \emph{ordered pair} of sentences. Given that the first sentence just changed, must the second one change too? Its input combines the pooled vectors $u_j$ (the changed sentence) and $u_k$ (the candidate), both from \Cref{eq:pool}:
+\begin{equation}
+g_{jk} \;=\; \sigma\!\Big(\mathrm{MLP}_\psi\big([\,u_j;\; u_k;\; u_j \odot u_k;\; |u_j - u_k|\,]\big)\Big).
+\label{eq:cons}
+\end{equation}
+The four blocks inside the brackets are the two vectors themselves, their elementwise product, and their elementwise absolute difference. The product and difference terms give the network explicit similarity signals it would otherwise have to learn on its own. This pair-feature construction is standard for sentence-pair tasks. The MLP (multi-layer perceptron, a stack of linear layers with nonlinearities between them) has one hidden layer of width 512. The subscript $\psi$ names the MLP's trainable weights, in the same way $\theta$ names the language model's. The whole head has about $4d \times 512$ weights and trains in minutes on cached hidden states.
+
+Positive training pairs come from the mining procedure of \Cref{sec:mining}, which pairs a directly contradicted edit with a consequential edit from the same article. Training encodes each pair the way inference will see it. The direct edit enters in its corrected version, because at inference the changed sentence has already been rewritten, and the candidate enters in its outdated version, because at inference the candidate has not been repaired yet. Negative pairs reuse the same first sentence with \keep{} sentences of the same article, three negatives per positive, so the head learns to separate consequence from mere co-occurrence in one article.
+
+\section{Edit Loop}
+\label{sec:inference}
+
+This section specifies one round end to end, then the loop control, and finally the cost model.
+
+\subsection{Masking Policy}
+\label{sec:maskpolicy}
+
+Round $r$ opens with a fresh forward pass over the evidence and the current article, because the previous round changed the text and the old hidden states no longer match the article. Call the resulting token scores $\pi_i^{(r)}$, computed as in \Cref{eq:token}.
+
+For each \edit{} sentence $s_j$, the masked set is every token scoring at or above a threshold:
+\begin{equation}
+\mathcal{M}_j \;=\; \big\{ i \in \mathcal{I}_j : \pi_i^{(r)} \ge \tau \big\}.
+\label{eq:maskset}
+\end{equation}
+Two rules limit the masked set. If $\mathcal{M}_j$ comes out empty even though the classifier wanted the sentence edited, we mask the top-scoring fifth of its tokens, trusting the classifier over the token scores. And $\mathcal{M}_j$ never exceeds half the sentence, because a sentence needing more than that is closer to a full rewrite than a repair.
+
+Masked positions then merge into \emph{spans}, maximal runs of masked tokens, where a run also absorbs a single unmasked token sandwiched between masked ones. Absorbing one-token gaps turns fragmented scores like \emph{three \mask{} people \mask{} died} into one contiguous rewrite region rather than two separate holes. The two limit rules and the gap absorption are heuristics. The system counts how often each one fires, and the counts go into the report.
+
+\subsection{Variable-Length Infilling}
+\label{sec:infill}
+
+A span of $\ell$ masks yields exactly $\ell$ tokens (\Cref{sec:mdlm}), and the correct replacement is often shorter or longer. The workaround is to infill the span several times at different lengths and keep the best result. The candidate set for a span of length $\ell$ is
+\begin{equation}
+\Lambda(\ell) \;=\; \{\,0,\; \lceil \ell/2 \rceil,\; \ell,\; \ell + 2,\; 2\ell\,\},
+\label{eq:lambda}
+\end{equation}
+after removing duplicates. Length zero means the span disappears, which is how the system deletes a phrase without deleting its sentence. Each candidate length runs the infilling sampler for $T = 8$ steps.
+
+Choosing among candidates needs a score, and the score must reward two things at once, fluency in context and agreement with the evidence. For fluency we use the masked pseudo-log-likelihood
+\begin{equation}
+\mathrm{PLL}(s) \;=\; \frac{1}{|s|} \sum_{i \in s} \log p_\theta\!\left(s_i \mid s_{\setminus i},\, X_{\mathrm{ctx}}\right).
+\label{eq:pll}
+\end{equation}
+For each token of the candidate sentence in turn, this masks exactly that one position and asks how probable the frozen model considers the true token there, given everything else. Averaging the log-probabilities gives a per-token fluency measure. Computing it costs one masked probe per token, and the probes batch together. Every candidate is scored as a whole sentence, so the deletion candidate competes on equal footing, and a sentence that reads better without the span gets a higher score.
+
+For agreement with the evidence we use a \emph{fact verifier}, a network trained to read a piece of evidence and a claim and to output the probability that the evidence supports the claim. We will use a verifier trained on VitaminC \citep{schuster-etal-2021-vitaminc}, a dataset of evidence-claim pairs built from Wikipedia revisions. The verifier reads one snippet and one sentence at a time. With several snippets in the input, we score the sentence against each snippet separately and keep the highest score, $\mathrm{Ent}(s, E) = \max_{e \in E} \mathrm{Ent}(s, e)$, so one supporting snippet is enough and distractor snippets do not dilute the result.
+
+The final candidate score blends both terms,
+\begin{equation}
+R(c) \;=\; \lambda\, \mathrm{PLL}(s^{c}) + (1 - \lambda)\, \mathrm{Ent}(s^{c}, E),
+\label{eq:rerank}
+\end{equation}
+where $s^c$ is the sentence after substituting candidate $c$. The blend weight $\lambda$ comes from a validation grid over $\{0.3, 0.5, 0.7\}$.
+
+The deletion candidate needs one extra rule. Removing a contested span also removes the claim the verifier would have checked, so the deletion candidate scores high whenever the remaining sentence is fluent. Length zero therefore wins only when its score beats the best rewrite by a margin tuned on validation. We also record how often length zero wins and how often the gold revision deletes. A large gap between those two rates signals the bias.
+
+Detect, Remask, Repair makes this choice differently. Instead of reranking finished candidates, it guides the sampler during decoding toward text that an external faithfulness scorer rewards, a technique called reward steering, and it also offers a repair model fine-tuned to fix a draft in one step. We choose reranking because it leaves the frozen sampler untouched and keeps the support check swappable. Steering remains the fallback if reranking proves weak.
+
+\subsection{Cascade Detectors}
+\label{sec:detectors}
+
+After infilling, the round checks which other sentences the repairs may have broken. Let $\Delta_r$ be the set of sentences repaired or deleted in round $r$. Several parts of the design also need a \emph{mention extractor} $M$, which works as follows. Run a standard named-entity recognizer (we will use the spaCy library) over the text, keep the names of people, organizations, and places that it finds along with all numbers and dates, lowercase and trim each one, and return the resulting set of strings. On the fire example, $M$ of the death-toll sentence contains the number \emph{three}, and $M$ of the evidence contains \emph{forty-two}.
+
+We will compare three detectors, in increasing order of sophistication. Each flags sentences outside $\Delta_r$.
+
+\begin{enumerate}
+\item[(a)] \emph{Mention overlap.} Flag $s_k$ when $M(s_k)$ shares at least one string with the mentions of the sentences repaired this round. The idea is that dependence usually travels through shared entities and figures. It needs no training and serves as the baseline. We expect high recall and low precision from it.
+\item[(b)] \emph{Staleness delta.} After the round's repairs, the article is re-encoded (line 7 of \Cref{alg:loop}). We call the resulting hidden states \emph{fresh}, in contrast to the states computed before the repairs. Re-score every token with \Cref{eq:token} under the fresh states, and flag $s_k$ when one of its tokens now scores $\pi_i \ge \tau_2$ and sits in the top tenth of the article's token scores, where it was not before the repairs. The idea is that a token which became \emph{more} suspicious after a repair is one the repair undermined. We compare ranks rather than raw score differences, because sigmoid scores from two different encodings can shift a little for reasons unrelated to the text, while ranks ignore any shift that moves all scores together. A drop-in-confidence trigger appears as a variant detector, within a single decoding run, in the work of \citet{yao-2026-remask}. Here it operates across rounds.
+\item[(c)] \emph{Consequence prediction.} Flag $s_k$ when the score $g_{jk}$ of \Cref{eq:cons} passes a threshold $\tau_c$ for any repaired sentence $s_j$. This is the only detector that had to be trained, and the only one that can catch dependence expressed without shared surface mentions, such as a paraphrase of the changed fact.
+\end{enumerate}
+
+Flagged sentences enter round $r+1$ as \edit{} sentences. If the classifier, under the fresh hidden states, favors \drop{} for a flagged sentence and clears the confidence gate of \Cref{sec:cls}, the sentence is deleted instead of re-masked.
+
+\subsection{Loop Control}
+\label{sec:loop}
+
+\Cref{alg:loop}, at the end of this section, assembles the stages. Two budgets bound the loop. The round count is capped at $R = 3$. And each token position may be re-masked at most $C_{\max} = 3$ times across the whole run, the per-position budget of \citet{yao-2026-remask}, which blocks the failure mode where the system masks a span, fills it badly, flags it again, and oscillates forever. Both caps are hard limits, so the loop always ends.
+
+\subsection{Cost Model}
+\label{sec:cost}
+
+The cost unit is one \emph{forward pass}, meaning one push of one input through the frozen model. Everything else, the heads included, is negligible next to it.
+
+Suppose a round touches $k$ spans. It spends one forward pass on scoring, $|\Lambda| \cdot T$ sampler steps per span (\Cref{eq:lambda}), and $|\Lambda| \cdot \bar\ell_s$ PLL probes per span (\Cref{eq:pll}), where $\bar\ell_s$ is the sentence length in tokens. With the defaults ($|\Lambda| = 5$, $T = 8$, $k = 3$, $\bar\ell_s = 25$), that is $1 + 3 \times 40 = 121$ sampler-style passes plus $375$ probes, all at sequence length near 700. Probes and candidates are independent, so they run in \emph{batches}, several inputs through the model at once.
+
+\begin{algorithm}[!ht]
+\caption{DiffusEdit inference. Thresholds and caps per \Cref{sec:maskpolicy,sec:detectors,sec:loop}. The length set $\Lambda$ comes from \Cref{eq:lambda} and the candidate score $R(c)$ from \Cref{eq:rerank}.}
+\label{alg:loop}
+\begin{algorithmic}[1]
+\State $H \gets f_\theta(E \oplus A)$; classify sentences; delete gated \drop{} sentences; $\mathcal{E} \gets$ \edit{} set
+\For{$r = 1, \dots, R$}
+  \For{$s_j \in \mathcal{E}$}
+    \State mask spans in $s_j$ per policy, skipping tokens with exhausted budgets $c_i = C_{\max}$
+    \State infill each span at every length in $\Lambda(\ell)$; keep the candidate maximizing $R(c)$
+  \EndFor
+  \State $H \gets f_\theta(E \oplus A^{(r)})$
+  \State $\mathcal{E} \gets$ sentences flagged by the active cascade detector
+  \If{$\mathcal{E} = \emptyset$ or no maskable token remains} \textbf{break}
+  \EndIf
+\EndFor
+\State \Return current article
+\end{algorithmic}
+\end{algorithm}
+
+\section{Data}
+\label{sec:data}
+
+\subsection{Distant Supervision}
+\label{sec:supervision}
+
+Supervised learning needs examples with answers. For this task an example is a triple: outdated article, evidence, corrected article. Nobody hand-writes such triples at scale, but Wikipedia's revision history contains millions of them. Whenever editors updated an article between two dates, the earlier version is the outdated article, the later version is the corrected one, and text added elsewhere on Wikipedia in the meantime can serve as evidence.
+
+Labels obtained this way are called \emph{distantly supervised}, meaning an automatic procedure inferred them and no human checked them. Distant supervision trades label quality for volume. Some fraction of the labels are wrong. The convention is to call the automatic labels \emph{silver} and human-verified labels \emph{gold}. The rule we follow everywhere is to train on silver, tune on silver, and report results on gold only.
+
+\subsection{FRUIT-WIKI}
+\label{sec:fruit}
+
+FRUIT-WIKI \citep{iv-etal-2022-fruit} is exactly such a dataset, built by diffing the introductory sections of English Wikipedia between yearly snapshots and attaching evidence snippets found elsewhere in the encyclopedia. \Cref{tab:fruit} lists the numbers we plan around. Two of them drive design decisions. First, the gold set has only 914 articles, so gold is strictly for final evaluation and would be far too small for training. Second, the FRUIT authors estimate that only about a third of silver edits are supported by their attached evidence. The remaining edits are stylistic rewrites or changes whose real source lies elsewhere. Our derived labels inherit this noise, which is one reason \Cref{sec:tokenhead} keeps a synthetic data stream alongside the derived one.
+
+An average article carries three to four updated sentences and about seven evidence snippets, and many snippets are irrelevant distractors that the system must learn to ignore.
+
+\begin{table}[t]
+\caption{FRUIT-WIKI statistics \citep{iv-etal-2022-fruit}. Evidence counts are snippets, not documents. Blank cells are unreported.}
+\label{tab:fruit}
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Split & Years & Articles & Edits & Evidence \\
+\midrule
+Train (silver) & 2019--2020 & 114K & 407K & 720K \\
+Test (silver) & 2020--2021 & 54K & 182K & \\
+Test (gold) & 2020--2021 & 914 & 3.0K & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Filtering}
+\label{sec:filtering}
+
+Two filters trim the raw data. First, the tokenized concatenation of evidence and article must fit in 1024 tokens, budgeted as 600 for evidence and 400 for the article. When the evidence runs over, snippets are truncated in increasing order of their mention overlap with the article (\Cref{sec:detectors}), so the least related snippet loses text first. The frozen model accepts longer inputs, but shorter sequences make every forward pass cheaper, and intro-section articles rarely need more. An instance whose article alone exceeds the budget leaves the dataset, which removes the longest articles and biases the test toward short ones. The cap is there for speed, not for any limit of the model, so if the retention report shows heavy losses on gold, we raise the cap and accept slower passes. Second, the update must modify or remove at least one existing sentence. Updates that only \emph{append} new sentences are excluded, because inserting a sentence means choosing where to open an all-\mask{} block, a placement decision our current design does not make. This is a scope cut, and we will report what fraction of the data each filter removes.
+
+We hold out two thousand silver articles as the validation set. The remaining silver articles train the heads, and gold is the test set. Thresholds that concern one head alone ($\tau$, $\tau_c$, $\tau_d$) are tuned against derived labels on the full validation set. Settings whose effect only shows through the whole loop ($\lambda$, $\tau_2$, the deletion margin, the round cap) are tuned on a fixed slice of 200 validation articles, with UpdateROUGE against the silver revision as the tuning objective. Silver labels are noisy, so a threshold tuned against them can be systematically off. As a check, we will re-tune $\tau$ on the one hundred audited articles of \Cref{sec:labels} and report both values.
+
+\subsection{Label Derivation}
+\label{sec:labels}
+
+The raw data gives article pairs $(A, A^\ast)$, but the heads need per-sentence and per-token labels. We derive them by alignment. Sentence boundaries come from the spaCy sentence splitter, the same library as the mention extractor, and every per-sentence decision in the system inherits its mistakes, so the audit below also records obvious mis-splits.
+
+\emph{Sentence alignment.} For every source sentence $s$ and target sentence $s'$, compute a similarity score, the F1 overlap of their token multisets, which is the harmonic mean of the fraction of $s$'s tokens present in $s'$ and the fraction of $s'$'s tokens present in $s$. Match pairs greedily from highest similarity down, each sentence used at most once. After matching, a source sentence with an exact match, or similarity at least $0.95$, is \keep{}; a source sentence matched with similarity at least $0.35$ is \edit{}; an unmatched source sentence is \drop{}. Unmatched \emph{target} sentences are additions, excluded from labels by the scope cut of \Cref{sec:filtering}.
+
+\emph{Token labels.} Inside every \edit{} pair, a token-level diff (the longest-common-subsequence algorithm familiar from version control) marks which source tokens the revision replaced or removed. These tokens are stale, and the rest are not. Insertions at a span boundary attach to the nearest stale token, so span expansion at inference time can express them.
+
+Alignment is a heuristic and it will make mistakes, most visibly on sentences rewritten so heavily that they resemble a deletion plus an unrelated addition. Before any training run consumes these labels, we will audit one hundred aligned articles by hand and record how often we disagree with the automatic labels. If the audit shows the aligner frequently confusing heavy rewrites with \drop{}-plus-addition, we will switch the similarity to a character-level F-score, which is more tolerant of rewordings that reuse word stems, and re-derive all labels.
+
+\subsection{Cascade Pair Mining}
+\label{sec:mining}
+
+Consequence prediction (\Cref{sec:conshead}) needs training pairs, and the cascade evaluation (\Cref{sec:metrics}) needs a labeled test set. No dataset provides either. The two are built by different procedures, because building both with one mining rule would grade every detector on a population selected by that rule's own criterion.
+
+Both procedures start from the same definitions. Let $D_j$ be the \emph{changed mentions} of sentence $j$, the strings that appear in the mention set of exactly one of the sentence's two versions, using the extractor $M$ of \Cref{sec:detectors}. An edited sentence is \emph{direct} when $D_j$ shares a string with the mentions of the evidence, meaning its changed content appears there. Every sentence that changed but is not direct is either a cascade or a stylistic rewrite.
+
+\emph{Evaluation set.} From the gold articles, we sample several hundred changed-but-not-direct sentences and hand-label each one as cascade or stylistic. The labeled cascades split into two groups, those that share a mention string with a direct edit of the same article and those that do not. Cascade recall (\Cref{sec:metrics}) is reported on each group separately. Detector (a) scores zero on the no-shared-mention group by construction, and that group is where consequence prediction is measured. The direct-or-not split is itself automatic, and a genuine cascade whose changed mentions happen to match an evidence string is classified direct and never reaches the hand-labeling. We therefore also hand-check one hundred automatically-direct sentences and report how many are mislabeled cascades.
+
+\emph{Training pairs.} Requiring a shared mention string would exclude every paraphrase cascade from training, so positives are mined by meaning instead. For each changed-but-not-direct silver sentence, compare the text its edit changed with the text each direct edit changed, using an off-the-shelf sentence encoder, a model that maps text to vectors so that vector closeness tracks closeness of meaning. Pairs above a validation-tuned similarity threshold become positives. Before anything trains on the mined pairs, we hand-label two hundred of them. If fewer than roughly sixty percent are genuine cascades, the pairs are too noisy to train on, so consequence prediction leaves the plan and detectors (a) and (b) proceed. String-overlap mining, which admits only shared-mention pairs, stays in the ablation grid as the alternative scheme. No evaluation sentence enters training.
+
+\section{Evaluation}
+\label{sec:eval}
+
+A single score cannot tell us what we need to know, because the system can fail in independent ways: it can miss stale text, repair it wrongly, rewrite text that was correct, or ignore cascades. This section defines one measurement per failure mode, after a short primer on the standard quantities.
+
+\subsection{Precision and Recall}
+\label{sec:primer}
+
+Suppose the token detector marks some tokens stale, and compare its marks with the true labels. \emph{Precision} is the fraction of marked tokens that are truly stale. \emph{Recall} is the fraction of truly stale tokens that the detector marked. The two trade off through the threshold $\tau$. Masking more aggressively raises recall and lowers precision. The \emph{F1 score} is their harmonic mean, a single number that is high only when both are. For a three-way classifier, \emph{macro-F1} computes F1 for each class separately and averages the three, so the frequent \keep{} class does not dominate the average.
+
+Any fixed threshold shows one point of the trade-off. Sweeping the threshold and plotting precision against recall gives the \emph{precision-recall curve}. The area under it summarizes detector quality across all thresholds and lets us compare detectors without committing to a single $\tau$.
+
+\subsection{Metrics}
+\label{sec:metrics}
+
+Let $U(\cdot)$ select an article's \emph{updated} sentences, the ones with no exact match in the original $A$ after whitespace normalization. The gold updated sentences are $U(A^\ast)$ and the system's are $U(\hat{A})$.
+
+\begin{itemize}
+\item \emph{UpdateROUGE} \citep{iv-etal-2022-fruit}. ROUGE counts overlapping word sequences between a system text and a reference text. ROUGE-1 counts shared single words, ROUGE-2 shared two-word sequences, and ROUGE-L the longest shared subsequence. Each is reported in its F1 form, combining the overlap measured in both directions. Whole-article ROUGE is useless here, because the untouched bulk of the article overlaps perfectly and hides the part that matters, so UpdateROUGE computes all three scores between $U(\hat{A})$ and $U(A^\ast)$ only. We treat UpdateROUGE as the primary quality metric.
+\item \emph{Entity precision and recall.} Extract mentions from the updated sentences with the mention extractor $M$ of \Cref{sec:detectors}, on both our output and the gold article. Precision is the fraction of our mentions that also appear among the gold mentions. Recall is the fraction of gold mentions that appear among ours. Updates mostly change names, numbers, and dates, and these two numbers target exactly those tokens.
+\item \emph{Unsupported entity tokens.} The count of entity tokens in $U(\hat{A})$ that appear in neither the original article nor the evidence. If the system writes that the fire happened in \emph{March} and no input text contains \emph{March}, that token counts. Every such token is a fabrication, so lower is better and zero is the goal.
+\item \emph{Faithfulness.} AlignScore \citep{zha-etal-2023-alignscore} between the updated sentences $U(\hat{A})$ and the evidence. AlignScore splits the evidence into chunks, scores each sentence against the chunks with a model trained on a broad mix of entailment and question-answering data, and aggregates the results into one number between zero and one. The metric is restricted to updated sentences for the same reason UpdateROUGE is. Kept sentences discuss content the evidence never mentions and would score near zero no matter what the system did, which would dilute the number.
+\item \emph{Minimality.} The token-level \emph{Levenshtein distance} between $\hat{A}$ and $A$, the minimum count of single-token insertions, deletions, and substitutions that turns one into the other, normalized by the longer length. Alongside it we report the fraction of gold-\keep{} sentences the output reproduces verbatim. Minimality is read together with the update metrics, never alone, since a system that edits nothing scores a perfect zero distance.
+\item \emph{Detection quality.} For the sentence classifier, macro-F1 over the three classes against labels derived from the gold revision pairs. For the token scorer, precision, recall, and the area under the precision-recall curve against the derived token labels.
+\item \emph{Cascade recall.} On the hand-labeled cascade set of \Cref{sec:mining}, the fraction of cascade sentences that the active detector flags in any round, reported separately for cascades that share a mention with a direct edit and for cascades that do not, plus UpdateROUGE restricted to cascade sentences. This is the direct test of the iterative loop.
+\end{itemize}
+
+Every metric above is automatic, and the reference-based ones compare against a single gold text, so a correct update phrased differently from the gold reference is penalized. To measure that effect, we will read fifty system outputs next to their gold articles, tally the errors by type (wrong fact, missed update, unnecessary edit, broken fluency), and report the tally next to the automatic numbers, following the error analysis format of \citet{iv-etal-2022-fruit}.
+
+\subsection{Baselines and Oracles}
+\label{sec:systems}
+
+Every system below sees the same filtered gold instances and is scored with every metric of \Cref{sec:metrics}.
+
+\emph{Copy.} Return $A$ unchanged. Copy scores perfectly on minimality, reproduces every gold-\keep{} sentence, and makes no updates.
+
+\emph{Full regeneration.} The input sequence is the evidence, then the outdated article, then a block of \mask{} tokens. The frozen sampler writes a complete updated article into the masked block, reading both the evidence and the old article as context. Nothing is preserved and everything is generated, the opposite of the editing pipeline. Because the block length fixes the output length, we generate at three target lengths, the original article length and 20\% shorter and longer, and keep the best by PLL (\Cref{eq:pll}). Regeneration is the opposite extreme from copy, scoring on the update metrics and not on minimality.
+
+\emph{Fine-tuned editor.} A T5 model fine-tuned on our filtered silver training split in the style of EDIT5 \citep{iv-etal-2022-fruit}, reading the evidence and the outdated article and emitting the updated article, with copy tokens standing in for unchanged sentences. This is the published approach on this data. Its backbone predates our gold window while the diffusion model postdates it, a mismatch \Cref{sec:validity} returns to.
+
+\emph{Prompted model.} An instruction-tuned autoregressive model of size comparable to ours, given a fixed prompt containing the evidence and the article and asked for the corrected article, decoding greedily. This is the point of comparison for solving the task with prompting alone.
+
+\emph{No-evidence control.} The full DiffusEdit pipeline with the evidence deleted from its input. Whatever it still fixes comes from the frozen model's own memory rather than from the evidence; \Cref{sec:validity} explains why this control matters.
+
+\emph{Oracles.} An oracle run replaces one stage's predictions with the true answers from the derived labels, while every other stage runs as normal. We run four. With \emph{oracle sentence labels}, the classifier is skipped and the derived \keep{}/\edit{}/\drop{} labels feed the masking stage directly. With \emph{oracle token masks}, the token scorer is skipped and exactly the derived stale tokens are masked inside the true \edit{} sentences, with the loop continuing from infilling. With \emph{oracle cascade flags}, the detector is skipped and each round flags exactly the hand-labeled cascade sentences from \Cref{sec:mining}. With \emph{oracle reranking}, the masks and candidates stay learned and the candidate closest to the gold text wins. The gap between oracle reranking and the learned reranker separates a candidate pool that lacks the right answer from a reranker that fails to pick it. An oracle is an upper bound, and the gap between an oracle run and the corresponding learned run measures how many points that stage's errors cost end to end, which tells us where to spend future effort.
+
+\subsection{Ablations}
+\label{sec:ablations}
+
+An \emph{ablation} removes or varies one component while holding the rest fixed, to measure that component's contribution. \Cref{tab:ablations} lists the grid, and each row varies one axis against the bolded defaults. With the cascade detector off, the system stops after one round, so this row measures what cascade detection adds. Ablation rows run on a fixed random subsample of 200 gold articles. The default configuration, the baselines, and the controls run on the full gold set.
+
+\begin{table}[t]
+\caption{Ablation axes. Defaults in bold. Each experiment varies one axis.}
+\label{tab:ablations}
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Axis & Values \\
+\midrule
+Cascade detector & none (single pass), (a), \textbf{(b)}, (c) \\
+Rounds $R$ & 1, 2, \textbf{3}, 4 \\
+Candidate lengths $\Lambda$ & $\{\ell\}$, $\{0, \ell\}$, \textbf{full} \\
+Detector training data & synthetic, derived, \textbf{mix} \\
+Reranker & PLL only, verifier only, \textbf{combined} \\
+Deletion margin & off, \textbf{on} \\
+Cascade mining & string overlap, \textbf{embedding} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Success Criteria}
+\label{sec:success}
+
+The experiments test three claims. With a cascade detector on, cascade recall and UpdateROUGE on cascade sentences must exceed the single-round numbers. DiffusEdit must reach the fine-tuned editor's UpdateROUGE, within the reported uncertainty, at no more than half the editor's normalized edit distance. The factor of one half is a bar chosen before the experiments, not a derived quantity. The full system must beat its own no-evidence control on the update metrics. Each claim can fail, and when time runs short, the experiments run in this order.
+
+\subsection{Validity}
+\label{sec:validity}
+
+Two problems could distort the reported numbers.
+
+\emph{Chance.} With 914 test articles, a small gap between two systems can come from luck rather than quality. We do not claim a win from a raw difference alone. Every reported comparison will carry an uncertainty estimate from a standard significance test over per-article scores, and gaps the test cannot separate from chance will be reported as ties. All thresholds ($\tau$, $\tau_2$, $\tau_c$, $\tau_d$, $\lambda$, and the deletion margin) are chosen on validation data through the procedure of \Cref{sec:filtering} and frozen before anything touches the test set.
+
+\emph{Pretraining contamination.} The frozen model's training data almost surely includes Wikipedia, possibly including the 2020--2021 revisions the gold set is built from. If so, the model may write the correct update from memory, with or without our evidence, and the scores would then reflect memory rather than use of the evidence. The no-evidence control of \Cref{sec:systems} measures this directly, because anything it fixes without seeing evidence must come from memory. If the control scores high, we will report it and treat the gap between the full system and the control, the \emph{evidence-conditioned gain}, as the measure of what the system adds.
+
+There is a related asymmetry between the baselines. The fine-tuned editor's backbone predates the 2020--2021 gold window, while the diffusion model and the prompted model postdate it, so the newer models may hold some answers in memory that the older one cannot. Pinning the diffusion model to a checkpoint from the editor's era would remove the asymmetry, but no such checkpoint exists. In mid-2022, discrete diffusion language models were research prototypes of roughly BERT scale, around one hundred million parameters \citep{austin-etal-2021-structured, he-etal-2022-diffusionbert}. Masked diffusion models at the billion-parameter scale arrived with LLaDA in 2025 \citep{nie-etal-2025-llada}. The control above is the substitute. We run the no-evidence control for every model-backed system, and across model generations we compare evidence-conditioned gains rather than raw scores.
+
+\section{Risks and Limitations}
+\label{sec:risks}
+
+\begin{enumerate}
+\item \emph{Evidence may not steer the generator.} The frozen model was never trained to treat a prepended snippet as overriding the fluent text around a masked span, so infilling may regenerate the stale content and give the reranker a candidate pool with no faithful member, which reranking cannot repair. Detect, Remask, Repair reports diffusion-model repair working on short summaries, and whether that transfers to article length is untested. The first implementation milestone measures it directly. Mask exactly the derived stale tokens on gold pairs, infill with the frozen model, and record the fraction of spans where any candidate contains the gold fact, with and without the evidence in the input. If the with-evidence rate is low, the escalation options, in order, are the instruction-tuned checkpoint with the evidence formatted as an instruction, a decoding-time score bonus for tokens that appear in the evidence, reward steering (\Cref{sec:infill}), and a small fine-tuned adapter for the repair step. The adapter departs from the frozen-model design and would be reported as such.
+\item \emph{Silver label noise.} About two thirds of silver edits lack support in their attached evidence, so the derived \edit{} labels overcount. Three defenses are already in the design: the synthetic corruption stream, the hundred-article label audit, and gold-only reporting. If the audit comes back worse than expected, we lean the detector training mix toward synthetic data.
+\item \emph{Detector shortcut.} The synthetic stream labels model-refilled tokens stale, so the token scorer could learn to recognize model-generated text rather than evidence contradiction. The training-data ablation measures this. A scorer trained only on synthetic data that scores well on synthetic validation and poorly on derived labels has learned the shortcut, and the training mix then leans toward derived data.
+\item \emph{Alignment brittleness.} If the label audit shows the aligner frequently mistaking a heavy rewrite for a deletion plus an addition, we switch the similarity from token-multiset F1 to a character-level F-score and re-derive all labels before training anything on them.
+\item \emph{Cascade mining noise.} If the hand-check of mined pairs lands below the bar of \Cref{sec:mining}, consequence prediction leaves the experiment plan and the loop rests on detectors (a) and (b).
+\item \emph{Insertion scope.} Excluding pure additions narrows the task, and the filter retention numbers will show by how much. The cut also limits cascade repair, since a cascade whose correct fix is a new sentence cannot be repaired, and a \drop{} decision is not revisited in later rounds. The natural extension is a placement head that chooses where to open an all-\mask{} block. It can reuse the pooled sentence vectors, and we keep it out of scope until the edit loop works.
+\item \emph{Consequence input.} Should consequence prediction read the changed sentence \emph{before} or \emph{after} its rewrite? Both vectors exist at round end. We start with after, because the rewritten content is what the dependent sentence must now agree with, and revisit the choice if cascade recall is low.
+\end{enumerate}
+
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\end{document}
