@@ -1,0 +1,27 @@
+[project]
+name = "pipeline"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate",
+    "bitsandbytes",
+    "huggingface-hub",
+    "numpy",
+    "torch==2.13.0",
+    "transformers",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
