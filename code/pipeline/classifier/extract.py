@@ -5,6 +5,10 @@ the chosen blocks. The deepest hook stops the pass, so later blocks and the
 LM head never run. The defaults fit an 11 GB RTX 2080 Ti: 4-bit NF4 weights,
 fp16 compute (Turing has no native bf16), batch size 1.
 
+The same pass also stores the unpooled hidden state of every token inside an
+EDIT sentence, from one layer, with its stale label, for the token staleness
+head (Eq. 7).
+
 Output directory:
     config.json    model, quantization, layers, source file
     ids.json       article ids in row order
@@ -12,10 +16,12 @@ Output directory:
     article.npy    int32 [n_sentences], index into ids.json
     layer{L}.npy   float16 [n_sentences, d], pooled output of block L (1-based)
     progress.json  articles and rows written so far. A rerun resumes here.
+    tokens/layer{L}.npy  float16 [n_tokens, d], one row per EDIT-sentence token
+    tokens/labels.npy    int8 [n_tokens], 1 if the token is stale
+    tokens/row.npy       int32 [n_tokens], the token's sentence row
 
 Usage:
-    python -m classifier.extract ../datasets/collated/test.jsonl features/test
-    python -m classifier.extract ../datasets/collated/train.jsonl features/train --sample 20000
+    python -m classifier.extract ../datasets/collated/train.jsonl features/train --sample 20000 --seed 42
 """
 
 import argparse
@@ -90,8 +96,16 @@ def main():
     parser.add_argument("--quant", choices=["4bit", "8bit", "none"], default="4bit")
     parser.add_argument("--layers", type=int, nargs="*", help="1-based blocks; default 3/4 depth and final")
     parser.add_argument("--sample", type=int, help="random subset of articles")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--token-layer", type=int, help="1-based block for token states; default final")
+    parser.add_argument("--tokens", action=argparse.BooleanOptionalAction, default=True,
+                        help="store EDIT-sentence token states")
     args = parser.parse_args()
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA is not available")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -100,11 +114,15 @@ def main():
     examples = [build(r, tok) for r in select(args.data, args.sample, args.seed)]
     offsets = np.cumsum([0] + [len(e.spans) for e in examples])
     rows = int(offsets[-1])
+    token_counts = [sum(len(m) for m in e.stale if m is not None) for e in examples]
+    token_offsets = np.cumsum([0] + token_counts) if args.tokens else np.zeros(len(examples) + 1, dtype=np.int64)
+    n_tokens = int(token_offsets[-1])
 
     model = load_model(args.model, args.quant)
     blocks_name, blocks = find_blocks(model)
     n_layers = len(blocks)
-    layers = sorted(set(args.layers or [round(0.75 * n_layers), n_layers]))
+    token_layer = (args.token_layer or n_layers) if args.tokens else None
+    layers = sorted(set(args.layers or [round(0.75 * n_layers), n_layers]) | ({token_layer} - {None}))
     d = model.config.d_model if hasattr(model.config, "d_model") else model.config.hidden_size
 
     config = {
@@ -119,6 +137,8 @@ def main():
         "seed": args.seed,
         "articles": len(examples),
         "rows": rows,
+        "token_layer": token_layer,
+        "tokens": n_tokens,
     }
     progress_path = out / "progress.json"
     config_path = out / "config.json"
@@ -132,24 +152,38 @@ def main():
         (out / "ids.json").write_text(json.dumps([e.id for e in examples]))
         np.save(out / "labels.npy", np.concatenate([e.labels for e in examples]).astype(np.int8))
         np.save(out / "article.npy", np.repeat(np.arange(len(examples), dtype=np.int32), np.diff(offsets)))
-        progress = {"articles": 0, "rows": 0, "nonfinite": 0}
+        if token_layer:
+            (out / "tokens").mkdir(exist_ok=True)
+            marks = [m for e in examples for m in e.stale if m is not None]
+            np.save(out / "tokens" / "labels.npy", np.concatenate(marks).astype(np.int8))
+            sentence_rows = [offsets[k] + j for k, e in enumerate(examples)
+                             for j, m in enumerate(e.stale) if m is not None]
+            np.save(out / "tokens" / "row.npy",
+                    np.repeat(np.asarray(sentence_rows, dtype=np.int32), [len(m) for m in marks]))
+        progress = {"articles": 0, "rows": 0, "tokens": 0, "nonfinite": 0}
         mode = "w+"
     memmaps = {
         layer: np.lib.format.open_memmap(out / f"layer{layer}.npy", mode=mode, dtype=np.float16, shape=(rows, d))
         for layer in layers
     }
+    token_mm = None
+    if token_layer:
+        token_mm = np.lib.format.open_memmap(out / "tokens" / f"layer{token_layer}.npy", mode=mode,
+                                             dtype=np.float16, shape=(n_tokens, d))
 
     def save_progress(k):
-        for mm in memmaps.values():
-            mm.flush()
-        progress["articles"], progress["rows"] = k, int(offsets[k])
+        for mm in [*memmaps.values(), token_mm]:
+            if mm is not None:
+                mm.flush()
+        progress["articles"], progress["rows"], progress["tokens"] = k, int(offsets[k]), int(token_offsets[k])
         progress_path.write_text(json.dumps(progress))
 
     store = {}
     attach(blocks, layers, store)
     device = next(model.parameters()).device
     start, t0 = progress["articles"], time.time()
-    print(f"{len(examples)} articles, {rows} sentences, layers {layers} of {n_layers}, resuming at {start}")
+    print(f"{len(examples)} articles, {rows} sentences, {n_tokens} EDIT tokens from layer {token_layer}, "
+          f"layers {layers} of {n_layers}, seed {args.seed}, resuming at {start}")
 
     with torch.inference_mode():
         for k in range(start, len(examples)):
@@ -165,6 +199,11 @@ def main():
                 if not torch.isfinite(pooled).all():
                     progress["nonfinite"] += 1
                 mm[offsets[k]:offsets[k + 1]] = pooled.cpu().numpy()
+            if token_mm is not None:
+                hidden = store[token_layer][0]
+                parts = [hidden[a:b] for (a, b), m in zip(example.spans, example.stale) if m is not None]
+                if parts:
+                    token_mm[token_offsets[k]:token_offsets[k + 1]] = torch.cat(parts).half().cpu().numpy()
             store.clear()
 
             done = k + 1

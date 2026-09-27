@@ -6,13 +6,13 @@ the train labels. Features are standardized with train statistics first. That
 is an affine map the linear layer could absorb, so the model class is the one
 in Eq. 5.
 
-After training, the DROP gate tau_d is tuned on validation (Section 6.2). A
-sentence whose argmax is DROP is deleted only if p_DROP >= tau_d. Otherwise it
-becomes EDIT.
+A seeded 10% of the train articles is held out, split by article so that no
+article has sentences on both sides. The held-out part drives early stopping
+and tunes the DROP gate tau_d (Section 6.2). A sentence whose argmax is DROP is
+deleted only if p_DROP >= tau_d. Otherwise it becomes EDIT.
 
 Usage:
-    python -m classifier.train --train features/train --val features/val \
-        --eval features/test features/fruit2026 --layer 32 --out heads/layer32
+    python -m classifier.train --train features/train --layer 32 --out heads/layer32
 """
 
 import argparse
@@ -29,12 +29,26 @@ TAU_GRID = np.round(np.arange(0.35, 0.951, 0.05), 2)
 
 
 def load(directory, layer):
-    """Features and labels for the rows extract.py has finished."""
+    """Features, labels, article indices and article count for the finished rows."""
     directory = Path(directory)
-    rows = json.loads((directory / "progress.json").read_text())["rows"]
+    progress = json.loads((directory / "progress.json").read_text())
+    rows = progress["rows"]
     x = np.load(directory / f"layer{layer}.npy", mmap_mode="r")[:rows]
     y = np.load(directory / "labels.npy")[:rows]
-    return torch.from_numpy(np.array(x)), torch.from_numpy(y.astype(np.int64))
+    article = np.load(directory / "article.npy")[:rows]
+    return torch.from_numpy(np.array(x)), torch.from_numpy(y.astype(np.int64)), article, progress["articles"]
+
+
+def split_by_article(article, n_articles, fraction, seed):
+    """Row masks for train and held-out.
+
+    A seeded `fraction` of the article indices 0..n_articles-1 is held out, so
+    the sentence head and the token head hold out the same articles.
+    """
+    rng = np.random.default_rng(seed)
+    held = rng.choice(n_articles, size=max(1, round(fraction * n_articles)), replace=False)
+    holdout = np.isin(article, held)
+    return torch.from_numpy(~holdout), torch.from_numpy(holdout)
 
 
 def moments(x, chunk=65536):
@@ -86,7 +100,7 @@ def scores(y, pred):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
-    parser.add_argument("--val", required=True)
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out")
     parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to report on")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--out", required=True)
@@ -95,17 +109,20 @@ def main():
     parser.add_argument("--batch", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    x_train, y_train = load(args.train, args.layer)
-    x_val, y_val = load(args.val, args.layer)
+    x_all, y_all, article, n_articles = load(args.train, args.layer)
+    fit, held = split_by_article(article, n_articles, args.holdout, args.seed)
+    x_train, y_train = x_all[fit], y_all[fit]
+    x_held, y_held = x_all[held], y_all[held]
+    del x_all
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
-    print(f"train {len(y_train)} sentences, val {len(y_val)}, "
+    print(f"train {len(y_train)} sentences, held out {len(y_held)}, "
           f"weights {dict(zip(LABELS, weights.tolist()))}")
 
     head = torch.nn.Linear(x_train.shape[1], len(LABELS)).to(device)
@@ -127,10 +144,10 @@ def main():
             total += loss.item() * len(idx)
 
         head.eval()
-        val_f1 = scores(y_val, predict(head, x_val, mean, std, device).argmax(-1))["macro_f1"]
-        print(f"epoch {epoch}  loss {total / len(y_train):.4f}  val macro-F1 {val_f1:.4f}")
-        if val_f1 > best:
-            best, stale = val_f1, 0
+        held_f1 = scores(y_held, predict(head, x_held, mean, std, device).argmax(-1))["macro_f1"]
+        print(f"epoch {epoch}  loss {total / len(y_train):.4f}  held-out macro-F1 {held_f1:.4f}")
+        if held_f1 > best:
+            best, stale = held_f1, 0
             best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
         else:
             stale += 1
@@ -139,15 +156,15 @@ def main():
     head.load_state_dict(best_state)
     head.eval()
 
-    val_probs = predict(head, x_val, mean, std, device)
-    sweep = {float(tau): scores(y_val, decide(val_probs, tau))["macro_f1"] for tau in TAU_GRID}
+    held_probs = predict(head, x_held, mean, std, device)
+    sweep = {float(tau): scores(y_held, decide(held_probs, tau))["macro_f1"] for tau in TAU_GRID}
     tau = max(sweep, key=sweep.get)
-    print(f"tau_d {tau}  val macro-F1 {sweep[tau]:.4f}")
+    print(f"tau_d {tau}  held-out macro-F1 {sweep[tau]:.4f}")
 
-    metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep,
-               "val": scores(y_val, decide(val_probs, tau))}
+    metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep, "holdout": args.holdout,
+               "seed": args.seed, "heldout": scores(y_held, decide(held_probs, tau))}
     for directory in args.eval:
-        x, y = load(directory, args.layer)
+        x, y, _, _ = load(directory, args.layer)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
         metrics[directory] = result
         per_class = "  ".join(f"{name} {result[name]['f1']:.3f}" for name in LABELS)
