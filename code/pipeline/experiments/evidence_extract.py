@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
@@ -38,7 +39,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from classifier.extract import Stop, attach, find_blocks, load_model
+from classifier.extract import Stop, attach, find_blocks, load_model, select
 from classifier.inputs import EVIDENCE_BUDGET, MODEL, build, encode, read_jsonl
 
 
@@ -66,15 +67,20 @@ def main():
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--quant", choices=["4bit", "8bit", "none"], default="4bit")
     parser.add_argument("--layers", type=int, nargs="*", help="1-based blocks; default 3/4 depth and final")
+    parser.add_argument("--sample", type=int, help="random subset of articles (use same value as classifier.extract)")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is not available")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    records = list(read_jsonl(args.data))
+    records = list(select(args.data, args.sample, args.seed))
     examples = [build(r, tok) for r in records]
 
     bos_offset = 0 if tok.bos_token_id is None else 1
@@ -110,6 +116,7 @@ def main():
     config = {
         "model": args.model, "quant": args.quant, "layers": layers, "n_layers": n_layers,
         "blocks": blocks_name, "d": d, "data": str(Path(args.data).resolve()),
+        "sample": args.sample, "seed": args.seed,
         "articles": len(examples), "rows": rows,
     }
     progress_path = out / "progress.json"
