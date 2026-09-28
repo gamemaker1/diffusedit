@@ -36,7 +36,7 @@ import torch
 import torch.nn.functional as F
 
 from classifier.inputs import LABELS
-from classifier.train import TAU_GRID, class_weights, decide, moments, scores
+from classifier.train import TAU_GRID, class_weights, decide, moments, scores, split_by_article
 
 
 def load_sentence(directory, layer):
@@ -83,7 +83,7 @@ def build_features(sentence_dir, evidence_dir, layer):
     n_articles = int(sent_article.max()) + 1
     evidence_agg = load_evidence_per_article(evidence_dir, layer, n_articles)
     x_evidence = evidence_agg[sent_article]
-    return torch.cat([x_sent, x_evidence], dim=1), y
+    return torch.cat([x_sent, x_evidence], dim=1), y, sent_article
 
 
 @torch.no_grad()
@@ -99,8 +99,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
     parser.add_argument("--train-evidence", required=True)
-    parser.add_argument("--val", required=True)
-    parser.add_argument("--val-evidence", required=True)
+    parser.add_argument("--val", default=None, help="sentence feature dir for val; if omitted a holdout is carved from train")
+    parser.add_argument("--val-evidence", default=None, help="evidence feature dir for val; required when --val is given")
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
     parser.add_argument("--eval", nargs="*", default=[], help="pairs like features/test=evidence_features/test")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--out", required=True)
@@ -116,9 +117,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("loading train...")
-    x_train, y_train = build_features(args.train, args.train_evidence, args.layer)
-    print("loading val...")
-    x_val, y_val = build_features(args.val, args.val_evidence, args.layer)
+    x_all, y_all, train_article = build_features(args.train, args.train_evidence, args.layer)
+
+    if args.val and args.val_evidence:
+        print("loading val...")
+        x_val, y_val, _ = build_features(args.val, args.val_evidence, args.layer)
+        x_train, y_train = x_all, y_all
+    else:
+        n_articles = int(train_article.max()) + 1
+        fit, held = split_by_article(train_article, n_articles, args.holdout, args.seed)
+        x_train, y_train = x_all[fit], y_all[fit]
+        x_val, y_val = x_all[held], y_all[held]
+        print(f"  no --val given: held out {args.holdout:.0%} of train articles ({len(y_val)} sentences)")
+    del x_all
+
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
     print(f"train {len(y_train)} sentences (feature dim {x_train.shape[1]}), val {len(y_val)}, "
@@ -164,7 +176,7 @@ def main():
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
     for pair in args.eval:
         feat_dir, ev_dir = pair.split("=")
-        x, y = build_features(feat_dir, ev_dir, args.layer)
+        x, y, _ = build_features(feat_dir, ev_dir, args.layer)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
         metrics[pair] = result
         per_class = "  ".join(f"{name} {result[name]['f1']:.3f}" for name in LABELS)
