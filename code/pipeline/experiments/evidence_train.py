@@ -21,9 +21,9 @@ classifier.train run on the SAME split for an apples-to-apples number.
 
 Usage:
     python -m experiments.evidence_train \
-        --train features/train --train-evidence evidence_features/train \
-        --val features/val --val-evidence evidence_features/val \
-        --eval features/test=evidence_features/test \
+        --train features/train \
+        --val features/val \
+        --eval features/test \
         --layer 32 --out heads/evidence_layer32
 """
 
@@ -57,9 +57,9 @@ def load_evidence_per_article(directory, layer, n_articles):
     nothing better to guess here".
     """
     directory = Path(directory)
-    rows = json.loads((directory / "progress.json").read_text())["rows"]
-    x = np.array(np.load(directory / f"layer{layer}.npy", mmap_mode="r")[:rows]).astype(np.float32)
-    article = np.load(directory / "article.npy")[:rows]
+    rows = json.loads((directory / "progress.json").read_text())["evidence_rows"]
+    x = np.array(np.load(directory / f"evidence_layer{layer}.npy", mmap_mode="r")[:rows]).astype(np.float32)
+    article = np.load(directory / "evidence_article.npy")[:rows]
 
     d = x.shape[1]
     agg = np.zeros((n_articles, d), dtype=np.float32)
@@ -78,10 +78,10 @@ def load_evidence_per_article(directory, layer, n_articles):
     return torch.from_numpy(agg)
 
 
-def build_features(sentence_dir, evidence_dir, layer):
-    x_sent, y, sent_article = load_sentence(sentence_dir, layer)
+def build_features(directory, layer):
+    x_sent, y, sent_article = load_sentence(directory, layer)
     n_articles = int(sent_article.max()) + 1
-    evidence_agg = load_evidence_per_article(evidence_dir, layer, n_articles)
+    evidence_agg = load_evidence_per_article(directory, layer, n_articles)
     x_evidence = evidence_agg[sent_article]
     return torch.cat([x_sent, x_evidence], dim=1), y, sent_article
 
@@ -98,11 +98,9 @@ def predict(head, x, mean, std, device, batch=8192):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
-    parser.add_argument("--train-evidence", required=True)
-    parser.add_argument("--val", default=None, help="sentence feature dir for val; if omitted a holdout is carved from train")
-    parser.add_argument("--val-evidence", default=None, help="evidence feature dir for val; required when --val is given")
+    parser.add_argument("--val", default=None, help="feature dir for val; if omitted a holdout is carved from train")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
-    parser.add_argument("--eval", nargs="*", default=[], help="pairs like features/test=evidence_features/test")
+    parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to evaluate on")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--epochs", type=int, default=30)
@@ -117,11 +115,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("loading train...")
-    x_all, y_all, train_article = build_features(args.train, args.train_evidence, args.layer)
+    x_all, y_all, train_article = build_features(args.train, args.layer)
 
-    if args.val and args.val_evidence:
+    if args.val:
         print("loading val...")
-        x_val, y_val, _ = build_features(args.val, args.val_evidence, args.layer)
+        x_val, y_val, _ = build_features(args.val, args.layer)
         x_train, y_train = x_all, y_all
     else:
         n_articles = int(train_article.max()) + 1
@@ -174,13 +172,12 @@ def main():
 
     metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep,
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
-    for pair in args.eval:
-        feat_dir, ev_dir = pair.split("=")
-        x, y, _ = build_features(feat_dir, ev_dir, args.layer)
+    for directory in args.eval:
+        x, y, _ = build_features(directory, args.layer)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
-        metrics[pair] = result
+        metrics[directory] = result
         per_class = "  ".join(f"{name} {result[name]['f1']:.3f}" for name in LABELS)
-        print(f"{pair}: macro-F1 {result['macro_f1']:.4f}  {per_class}")
+        print(f"{directory}: macro-F1 {result['macro_f1']:.4f}  {per_class}")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

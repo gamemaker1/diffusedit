@@ -32,6 +32,7 @@ class Example:
     id: str
     input_ids: np.ndarray
     spans: list[tuple[int, int]]
+    evidence_spans: list[tuple[int, int]]
     labels: list[int]
     stale: list[np.ndarray | None]
 
@@ -53,11 +54,17 @@ def evidence_ids(tok, evidence, budget=EVIDENCE_BUDGET):
     The collated data is already truncated to 600 LLaDA tokens without titles.
     The cut here enforces the budget again after titles are added.
     """
-    ids = []
+    ids, spans = [], []
     for i, snippet in enumerate(evidence):
         text = f"{snippet['title']}: {snippet['text']}"
-        ids += encode(tok, text if i == 0 else "\n" + text)
-    return ids[:budget]
+        piece = encode(tok, text if i == 0 else "\n" + text)
+        start = len(ids)
+        ids += piece
+        spans.append((start, len(ids)))
+    if len(ids) > budget:
+        ids = ids[:budget]
+        spans = [(s, min(e, budget)) for s, e in spans if s < budget]
+    return ids, spans
 
 
 def stale_marks(offsets, stale_spans, shift):
@@ -72,7 +79,9 @@ def stale_marks(offsets, stale_spans, shift):
 
 def build(record, tok):
     ids = [] if tok.bos_token_id is None else [tok.bos_token_id]
-    ids += evidence_ids(tok, record["evidence"])
+    ev_ids, ev_spans = evidence_ids(tok, record["evidence"])
+    shifted_ev_spans = [(s + len(ids), e + len(ids)) for s, e in ev_spans]
+    ids += ev_ids
     ids += encode(tok, SEPARATOR)
 
     if len(record["labels"]) != len(record["source_sentences"]):
@@ -93,7 +102,7 @@ def build(record, tok):
             stale.append(stale_marks(enc["offset_mapping"], entry["stale_spans"], len(prefix) - lead))
         else:
             stale.append(None)
-    return Example(record["id"], np.asarray(ids, dtype=np.int32), spans, labels, stale)
+    return Example(record["id"], np.asarray(ids, dtype=np.int32), spans, shifted_ev_spans, labels, stale)
 
 
 def main():

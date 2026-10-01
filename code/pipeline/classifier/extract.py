@@ -114,6 +114,8 @@ def main():
     examples = [build(r, tok) for r in select(args.data, args.sample, args.seed)]
     offsets = np.cumsum([0] + [len(e.spans) for e in examples])
     rows = int(offsets[-1])
+    evidence_offsets = np.cumsum([0] + [len(e.evidence_spans) for e in examples])
+    evidence_rows = int(evidence_offsets[-1])
     token_counts = [sum(len(m) for m in e.stale if m is not None) for e in examples]
     token_offsets = np.cumsum([0] + token_counts) if args.tokens else np.zeros(len(examples) + 1, dtype=np.int64)
     n_tokens = int(token_offsets[-1])
@@ -137,6 +139,7 @@ def main():
         "seed": args.seed,
         "articles": len(examples),
         "rows": rows,
+        "evidence_rows": evidence_rows,
         "token_layer": token_layer,
         "tokens": n_tokens,
     }
@@ -152,6 +155,7 @@ def main():
         (out / "ids.json").write_text(json.dumps([e.id for e in examples]))
         np.save(out / "labels.npy", np.concatenate([e.labels for e in examples]).astype(np.int8))
         np.save(out / "article.npy", np.repeat(np.arange(len(examples), dtype=np.int32), np.diff(offsets)))
+        np.save(out / "evidence_article.npy", np.repeat(np.arange(len(examples), dtype=np.int32), np.diff(evidence_offsets)))
         if token_layer:
             (out / "tokens").mkdir(exist_ok=True)
             marks = [m for e in examples for m in e.stale if m is not None]
@@ -160,10 +164,14 @@ def main():
                              for j, m in enumerate(e.stale) if m is not None]
             np.save(out / "tokens" / "row.npy",
                     np.repeat(np.asarray(sentence_rows, dtype=np.int32), [len(m) for m in marks]))
-        progress = {"articles": 0, "rows": 0, "tokens": 0, "nonfinite": 0}
+        progress = {"articles": 0, "rows": 0, "evidence_rows": 0, "tokens": 0, "nonfinite": 0}
         mode = "w+"
     memmaps = {
         layer: np.lib.format.open_memmap(out / f"layer{layer}.npy", mode=mode, dtype=np.float16, shape=(rows, d))
+        for layer in layers
+    }
+    evidence_memmaps = {
+        layer: np.lib.format.open_memmap(out / f"evidence_layer{layer}.npy", mode=mode, dtype=np.float16, shape=(evidence_rows, d))
         for layer in layers
     }
     token_mm = None
@@ -172,10 +180,13 @@ def main():
                                              dtype=np.float16, shape=(n_tokens, d))
 
     def save_progress(k):
-        for mm in [*memmaps.values(), token_mm]:
+        for mm in [*memmaps.values(), *evidence_memmaps.values(), token_mm]:
             if mm is not None:
                 mm.flush()
-        progress["articles"], progress["rows"], progress["tokens"] = k, int(offsets[k]), int(token_offsets[k])
+        progress["articles"] = k
+        progress["rows"] = int(offsets[k])
+        progress["evidence_rows"] = int(evidence_offsets[k])
+        progress["tokens"] = int(token_offsets[k])
         progress_path.write_text(json.dumps(progress))
 
     store = {}
@@ -195,10 +206,18 @@ def main():
                 pass
             for layer, mm in memmaps.items():
                 hidden = store[layer][0].float()
+                
                 pooled = torch.stack([hidden[a:b].mean(0) for a, b in example.spans]).half()
                 if not torch.isfinite(pooled).all():
                     progress["nonfinite"] += 1
                 mm[offsets[k]:offsets[k + 1]] = pooled.cpu().numpy()
+                
+                if example.evidence_spans:
+                    pooled_ev = torch.stack([hidden[a:b].mean(0) for a, b in example.evidence_spans]).half()
+                    if not torch.isfinite(pooled_ev).all():
+                        progress["nonfinite"] += 1
+                    evidence_memmaps[layer][evidence_offsets[k]:evidence_offsets[k + 1]] = pooled_ev.cpu().numpy()
+                    
             if token_mm is not None:
                 hidden = store[token_layer][0]
                 parts = [hidden[a:b] for (a, b), m in zip(example.spans, example.stale) if m is not None]
