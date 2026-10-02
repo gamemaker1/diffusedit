@@ -11,8 +11,15 @@ article has sentences on both sides. The held-out part drives early stopping
 and tunes the DROP gate tau_d (Section 6.2). A sentence whose argmax is DROP is
 deleted only if p_DROP >= tau_d. Otherwise it becomes EDIT.
 
+--loss focal replaces the weighted cross-entropy with the weighted focal
+loss -w_y (1 - p_y)^gamma log p_y. --seeds trains once per seed, each with its
+own held-out split, initialization and batch order, and loads the features
+once.
+
 Usage:
     python -m classifier.train --train features/train --layer 32 --out heads/layer32
+    python -m classifier.train --train features/train --layer 24 --loss focal \
+        --seeds 42 1 2 3 4 --save-predictions --out heads/focal/layer24
 """
 
 import argparse
@@ -97,32 +104,26 @@ def scores(y, pred):
     return out
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out")
-    parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to report on")
-    parser.add_argument("--layer", type=int, required=True)
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--patience", type=int, default=3)
-    parser.add_argument("--batch", type=int, default=1024)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-2)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+def focal_loss(logits, y, weights, gamma):
+    """Class-weighted focal loss, -w_y (1 - p_y)^gamma log p_y, summed.
 
-    torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    gamma = 0 gives the weighted cross-entropy used by default. A larger gamma
+    shrinks the loss of sentences the head already classifies with high
+    probability, so training concentrates on the hard ones.
+    """
+    logp = F.log_softmax(logits, -1).gather(1, y[:, None])[:, 0]
+    return -(weights[y] * (1 - logp.exp()) ** gamma * logp).sum()
 
-    x_all, y_all, article, n_articles = load(args.train, args.layer)
-    fit, held = split_by_article(article, n_articles, args.holdout, args.seed)
+
+def train_one(args, x_all, y_all, article, n_articles, seed, out, device):
+    torch.manual_seed(seed)
+    fit, held = split_by_article(article, n_articles, args.holdout, seed)
     x_train, y_train = x_all[fit], y_all[fit]
     x_held, y_held = x_all[held], y_all[held]
-    del x_all
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
-    print(f"train {len(y_train)} sentences, held out {len(y_held)}, "
+    print(f"seed {seed}: train {len(y_train)} sentences, held out {len(y_held)}, loss {args.loss}"
+          f"{f' gamma {args.gamma}' if args.loss == 'focal' else ''}, "
           f"weights {dict(zip(LABELS, weights.tolist()))}")
 
     head = torch.nn.Linear(x_train.shape[1], len(LABELS)).to(device)
@@ -137,7 +138,10 @@ def main():
             idx = order[i:i + args.batch]
             xb = (x_train[idx].to(device).float() - mean) / std
             yb = y_train[idx].to(device)
-            loss = F.cross_entropy(head(xb), yb, weight=weights, reduction="sum") / len(idx)
+            if args.loss == "focal":
+                loss = focal_loss(head(xb), yb, weights, args.gamma) / len(idx)
+            else:
+                loss = F.cross_entropy(head(xb), yb, weight=weights, reduction="sum") / len(idx)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -159,10 +163,11 @@ def main():
     held_probs = predict(head, x_held, mean, std, device)
     sweep = {float(tau): scores(y_held, decide(held_probs, tau))["macro_f1"] for tau in TAU_GRID}
     tau = max(sweep, key=sweep.get)
-    print(f"tau_d {tau}  held-out macro-F1 {sweep[tau]:.4f}")
+    print(f"seed {seed}: tau_d {tau}  held-out macro-F1 {sweep[tau]:.4f}")
 
     metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep, "holdout": args.holdout,
-               "seed": args.seed, "heldout": scores(y_held, decide(held_probs, tau))}
+               "seed": seed, "loss": args.loss, "gamma": args.gamma if args.loss == "focal" else None,
+               "heldout": scores(y_held, decide(held_probs, tau))}
     for directory in args.eval:
         x, y, _, _ = load(directory, args.layer)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
@@ -170,11 +175,44 @@ def main():
         per_class = "  ".join(f"{name} {result[name]['f1']:.3f}" for name in LABELS)
         print(f"{directory}: macro-F1 {result['macro_f1']:.4f}  {per_class}")
 
-    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "layer": args.layer, "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    if args.save_predictions:
+        np.savez_compressed(out / "heldout_predictions.npz", rows=held.nonzero()[:, 0].numpy(),
+                            article=article[held.numpy()], probs=held_probs.numpy().astype(np.float32),
+                            labels=y_held.numpy().astype(np.int8), tau_d=tau)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--train", required=True)
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out")
+    parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to report on")
+    parser.add_argument("--layer", type=int, required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--batch", type=int, default=1024)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", type=int, nargs="+",
+                        help="train once per seed (split, initialization, order) into <out>/seed<N>")
+    parser.add_argument("--loss", choices=["ce", "focal"], default="ce")
+    parser.add_argument("--gamma", type=float, default=2.0, help="focusing exponent of --loss focal")
+    parser.add_argument("--save-predictions", action="store_true",
+                        help="write held-out probabilities to heldout_predictions.npz")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x_all, y_all, article, n_articles = load(args.train, args.layer)
+    if args.seeds:
+        for seed in args.seeds:
+            train_one(args, x_all, y_all, article, n_articles, seed, Path(args.out) / f"seed{seed}", device)
+    else:
+        train_one(args, x_all, y_all, article, n_articles, args.seed, Path(args.out), device)
 
 
 if __name__ == "__main__":
