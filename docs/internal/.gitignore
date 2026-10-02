@@ -7,3 +7,5 @@
 *.toc
 *.fdb_latexmk
 *.pdf
+
+!progress/figures/*.pdf
