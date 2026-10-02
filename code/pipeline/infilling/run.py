@@ -25,6 +25,8 @@ Usage:
     python -m infilling.run ../datasets/collated/test.jsonl runs/oracle-noev --masks oracle --no-evidence
     python -m infilling.run ../datasets/collated/val.jsonl runs/val-lam03 --masks predicted \
         --staleness-head heads/staleness/head.pt --lam 0.3 --limit 200
+    python -m infilling.run ../datasets/collated/train.jsonl runs/train-heldout --masks predicted \
+        --staleness-head heads/staleness/head.pt --ids heads/staleness/heldout_ids.json --limit 500
 """
 
 import argparse
@@ -40,11 +42,11 @@ import torch
 from transformers import AutoTokenizer
 
 from classifier.extract import select
-from classifier.inputs import DROP, EDIT, LABELS, MODEL, build
+from classifier.inputs import DROP, EDIT, LABELS, MODEL, build, read_jsonl
 from infilling.model import Model
 from infilling.repair import Settings, repair_sentence
 from infilling.score import VERIFIER, Verifier
-from infilling.spans import Article, oracle_spans, policy_spans
+from infilling.spans import Article, oracle_spans, policy_spans, snap, word_starts
 
 C_MAX = 3
 
@@ -59,6 +61,8 @@ def parse():
     parser.add_argument("--staleness-head", help="head.pt from staleness.train, for --masks predicted")
     parser.add_argument("--tau", type=float, help="mask threshold; default the head's tuned tau")
     parser.add_argument("--c-max", type=int, default=C_MAX, help="remask budget per token")
+    parser.add_argument("--whole-words", action=argparse.BooleanOptionalAction, default=True,
+                        help="widen mask spans to whole words")
     parser.add_argument("--evidence", action=argparse.BooleanOptionalAction, default=True,
                         help="--no-evidence removes the evidence from the input and the verifier")
     parser.add_argument("--lengths", choices=["same", "keep-or-drop", "full"], default="full",
@@ -76,11 +80,14 @@ def parse():
     parser.add_argument("--support-index", type=int, help="SUPPORTS class index, if the label names are generic")
     parser.add_argument("--batch", type=int, default=8, help="PLL probes per forward pass")
     parser.add_argument("--sample", type=int, help="random subset of articles")
-    parser.add_argument("--limit", type=int, help="first N articles, after --sample")
+    parser.add_argument("--ids", help="JSON list of article ids to keep, such as staleness.train's heldout_ids.json")
+    parser.add_argument("--limit", type=int, help="first N articles, after --sample or --ids")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if args.masks == "predicted" and not args.staleness_head:
         parser.error("--masks predicted needs --staleness-head")
+    if args.ids and args.sample:
+        parser.error("--ids and --sample both choose the articles, pass one")
     if args.scorer == "verifier" and not args.evidence:
         parser.error("--scorer verifier has nothing to verify against with --no-evidence")
     return args
@@ -151,7 +158,12 @@ def main():
         tau = tuned_tau if args.tau is None else args.tau
         print(f"staleness head at layer {layer}, tau {tau}")
 
-    records = list(itertools.islice(select(args.data, args.sample, args.seed), args.limit))
+    if args.ids:
+        wanted = set(json.loads(Path(args.ids).read_text()))
+        chosen = (r for r in read_jsonl(args.data) if r["id"] in wanted)
+    else:
+        chosen = select(args.data, args.sample, args.seed)
+    records = list(itertools.islice(chosen, args.limit))
     todo = [r for r in records if r["id"] not in finished]
     print(f"{len(records)} articles, {len(finished)} already done, "
           f"masks {args.masks}, evidence {args.evidence}, scorer {args.scorer}")
@@ -174,6 +186,9 @@ def main():
                     counts = article.counts[j]
                     spans[j] = (policy_spans(scores[j], counts, tau, args.c_max, stats) if head is not None
                                 else oracle_spans(example.stale[j], counts, args.c_max))
+                    if args.whole_words and spans[j]:
+                        pieces = [tok.decode([int(t)]) for t in article.sentences[j]]
+                        spans[j] = snap(spans[j], word_starts(pieces), stats)
             for j, label in enumerate(example.labels):
                 if label == DROP:
                     article.drop(j)
