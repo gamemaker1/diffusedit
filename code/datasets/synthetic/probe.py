@@ -17,10 +17,11 @@ def load(path):
         ev = [norm(e["text"]) for e in r["evidence"]]
         titles = {e["title"] for e in r["evidence"]}
         for s, l in zip(r["source_sentences"], r["labels"]):
-            for x, z in l["stale_spans"]:
+            for x, z in l.get("stale_spans", []):
                 bad += not (0 <= x < z <= len(s))
-            if l["label"] == "EDIT": bad += not l["stale_spans"] or s == l["target"]
-            if l["label"] == "KEEP": bad += s != l["target"]
+            if "target" in l:  # the synthetic schema; FRUIT records keep the rewrite elsewhere
+                if l["label"] == "EDIT": bad += not l["stale_spans"] or s == l["target"]
+                if l["label"] == "KEEP": bad += s != l["target"]
             n = norm(s)[:250]
             hit = [e for e in ev if n in e]
             feats.append([len(ev), bool(hit), any(e != norm(s) and "'" in e for e in hit), len(hit),
@@ -40,8 +41,8 @@ for path in sys.argv[1:]:
         f = f1_score(y[held], p, average=None)
         print(f"  {name:26s} macro-F1 {f.mean():.3f}  KEEP {f[0]:.3f} EDIT {f[1]:.3f} DROP {f[2]:.3f}")
     edit = [(s, l) for r in rows for s, l in zip(r["source_sentences"], r["labels"]) if l["label"] == "EDIT"]
-    stale = sum(b - a for s, l in edit for a, b in l["stale_spans"]); chars = sum(len(s) for s, _ in edit)
-    top = collections.Counter(s[a:b] for s, l in edit for a, b in l["stale_spans"])
-    print(f"  stale share of EDIT characters {stale / chars:.3f}, distinct stale strings {len(top)}, top 12 cover {sum(v for _, v in top.most_common(12)) / sum(top.values()):.3f}")
+    stale = sum(b - a for s, l in edit for a, b in l.get("stale_spans", [])); chars = sum(len(s) for s, _ in edit)
+    top = collections.Counter(s[a:b] for s, l in edit for a, b in l.get("stale_spans", []))
+    print(f"  stale share of EDIT characters {stale / chars:.3f}, distinct stale strings {len(top)}, top 12 cover {sum(v for _, v in top.most_common(12)) / max(sum(top.values()), 1):.3f}")
     ne = [len(r["evidence"]) for r in rows]; ec = [sum(len(e["text"]) + len(e["title"]) + 3 for e in r["evidence"]) for r in rows]
     print(f"  snippets per article {np.mean(ne):.2f}, evidence chars mean {np.mean(ec):.0f}, p99 {np.percentile(ec, 99):.0f}, over 2400 chars {np.mean(np.array(ec) > 2400):.3f}")

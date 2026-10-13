@@ -31,7 +31,7 @@ This script keeps the gold rewrites and rebuilds the rest:
     suffix      The appended sentences of shortcut 4 are removed.
 
 Usage:
-    python rebuild.py train_30k_diverse.jsonl train_30k_v2.jsonl
+    python rebuild.py train_30k_diverse.jsonl rebuilt.jsonl
 """
 
 import argparse

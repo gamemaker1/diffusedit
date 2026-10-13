@@ -1,7 +1,7 @@
 """Replace the evidence of rebuilt records with written passages.
 
 rebuild.py leaves evidence that copies the gold sentence. Writers (language
-model agents following writer_brief.md) produce, per article, passages
+model agents following prompt.md) produce, per article, passages
 that read as excerpts of other documents. This script joins them to the
 records and keeps an article only if its passages pass every check:
 
@@ -11,7 +11,7 @@ records and keeps an article only if its passages pass every check:
     no passage copies seven consecutive words of a sentence
 
 Usage:
-    python merge_evidence.py train_30k_v2.jsonl passages/ train_written.jsonl
+    python merge.py rebuilt.jsonl passages/ train.jsonl
 """
 
 import argparse
