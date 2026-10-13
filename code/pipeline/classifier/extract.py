@@ -3,7 +3,8 @@
 One frozen forward pass per article over E ⊕ A, no masks. Forward hooks read
 the chosen blocks. The deepest hook stops the pass, so later blocks and the
 LM head never run. The defaults fit an 11 GB RTX 2080 Ti: 4-bit NF4 weights,
-fp16 compute (Turing has no native bf16), batch size 1.
+fp16 compute (Turing has no native bf16), batch size 1. On compute capability
+8.0 or newer the compute dtype is bf16, which has the fp32 exponent range.
 
 The same pass also stores the unpooled hidden state of every token inside an
 EDIT sentence, from one layer, with its stale label, for the token staleness
@@ -43,13 +44,18 @@ class Stop(Exception):
     """Raised by the deepest hook to end the forward pass early."""
 
 
+def compute_dtype():
+    return torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+
+
 def load_model(name, quant):
-    kwargs = {"trust_remote_code": True, "torch_dtype": torch.float16, "device_map": {"": 0}}
+    dtype = compute_dtype()
+    kwargs = {"trust_remote_code": True, "torch_dtype": dtype, "device_map": {"": 0}}
     if quant == "4bit":
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=dtype,
         )
     elif quant == "8bit":
         kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
@@ -130,6 +136,7 @@ def main():
     config = {
         "model": args.model,
         "quant": args.quant,
+        "dtype": str(compute_dtype()),
         "layers": layers,
         "n_layers": n_layers,
         "blocks": blocks_name,

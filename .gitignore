@@ -8,3 +8,6 @@ audit/
 datasets/
 outputs/
 *.log
+
+code/pipeline/outputs/
+outputs.zip

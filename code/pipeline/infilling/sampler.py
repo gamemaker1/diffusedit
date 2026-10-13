@@ -24,6 +24,7 @@ def schedule(k, steps):
     return [k // n + (i < k % n) for i in range(n)]
 
 
+@torch.inference_mode()
 def sample(model, ids, positions, steps, temperature=0.0, generator=None):
     """Fill `positions` of the 1-D sequence `ids`.
 

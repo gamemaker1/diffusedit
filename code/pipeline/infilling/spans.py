@@ -10,6 +10,10 @@ highest count in the span plus one, and a token at C_max is never masked
 again (Section 7.4).
 
 Spans are half-open (start, end) ranges local to their sentence.
+
+Masks are chosen per token, and a token can be part of a word. snap() widens
+each span to whole words, so infilling never keeps half of a word, such as
+"anzi" left over from masking " (including Chinese h".
 """
 
 import math
@@ -32,7 +36,7 @@ RULES = {
 LENGTH_SETS = {
     "same": ("same",),
     "keep-or-drop": ("zero", "same"),
-    "full": ("zero", "half", "same", "plus2", "double"),
+    "full": ("zero", "half", "same", "plus2"),
 }
 
 
@@ -113,6 +117,36 @@ def runs(mask):
     if start is not None:
         spans.append((start, len(mask)))
     return spans
+
+
+def word_starts(pieces):
+    """True where a token begins a word. `pieces` are the decoded tokens.
+
+    A token begins a word when it is first, starts with a non-alphanumeric
+    character (a space or punctuation), or follows a token that ends with one.
+    """
+    starts = np.ones(len(pieces), dtype=bool)
+    for i in range(1, len(pieces)):
+        starts[i] = not pieces[i][:1].isalnum() or not pieces[i - 1][-1:].isalnum()
+    return starts
+
+
+def snap(spans, starts, stats=None):
+    """Widen each span to whole words and merge spans that then overlap or touch."""
+    n, out = len(starts), []
+    for a, b in spans:
+        a0, b0 = a, b
+        while a > 0 and not starts[a]:
+            a -= 1
+        while b < n and not starts[b]:
+            b += 1
+        if stats is not None and (a, b) != (a0, b0):
+            stats["snapped"] += 1
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
 
 
 def oracle_spans(stale, counts, c_max):

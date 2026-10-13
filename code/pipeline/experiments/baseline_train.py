@@ -19,7 +19,12 @@ CAVEAT: same as experiments.evidence_train -- the team's audit
 labels. A weak result here does not prove LLaDA is necessary; it could be
 the same label noise dragging every approach down equally.
 
+Without --val, a seeded fraction of the train articles is held out, chosen by
+classifier.train.split_by_article, the same rule the LLaDA heads use.
+
 Usage:
+    python -m experiments.baseline_train \
+        --train ../datasets/collated/train.jsonl --out heads/baseline
     python -m experiments.baseline_train \
         --train ../datasets/collated/train.jsonl --val ../datasets/collated/val.jsonl \
         --eval ../datasets/collated/test.jsonl --out heads/baseline
@@ -35,7 +40,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
 from classifier.inputs import LABEL_ID, LABELS, read_jsonl
-from classifier.train import TAU_GRID, class_weights, decide, moments, scores
+from classifier.train import TAU_GRID, class_weights, decide, moments, scores, split_by_article
 
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -92,7 +97,7 @@ def build_features(path, embedder):
                 evidence_agg[a] = x_evidence[mask].mean(0)
 
     x = torch.cat([x_sent, evidence_agg[sent_article]], dim=1)
-    return x, torch.from_numpy(y)
+    return x, torch.from_numpy(y), sent_article, n_articles
 
 
 @torch.no_grad()
@@ -104,32 +109,11 @@ def predict(head, x, mean, std, device, batch=8192):
     return torch.cat(probs)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--val", required=True)
-    parser.add_argument("--eval", nargs="*", default=[])
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--patience", type=int, default=3)
-    parser.add_argument("--batch", type=int, default=1024)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-2)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    embedder = Embedder(args.model, device=str(device))
-
-    print(f"train: {args.train}")
-    x_train, y_train = build_features(args.train, embedder)
-    print(f"val: {args.val}")
-    x_val, y_val = build_features(args.val, embedder)
+def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out, held_rows=None):
+    torch.manual_seed(seed)
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
-    print(f"train {len(y_train)} sentences (feature dim {x_train.shape[1]}), val {len(y_val)}, "
+    print(f"seed {seed}: train {len(y_train)} sentences (feature dim {x_train.shape[1]}), val {len(y_val)}, "
           f"weights {dict(zip(LABELS, weights.tolist()))}")
 
     head = torch.nn.Linear(x_train.shape[1], len(LABELS)).to(device)
@@ -166,22 +150,73 @@ def main():
     val_probs = predict(head, x_val, mean, std, device)
     sweep = {float(tau): scores(y_val, decide(val_probs, tau))["macro_f1"] for tau in TAU_GRID}
     tau = max(sweep, key=sweep.get)
-    print(f"tau_d {tau}  val macro-F1 {sweep[tau]:.4f}")
+    print(f"seed {seed}: tau_d {tau}  val macro-F1 {sweep[tau]:.4f}")
 
     metrics = {"model": args.model, "tau_d": tau, "tau_sweep": sweep,
+               "holdout": None if args.val else args.holdout, "seed": seed,
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
     for path in args.eval:
-        x, y = build_features(path, embedder)
+        x, y, _, _ = build_features(path, embedder)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
         metrics[path] = result
         per_class = "  ".join(f"{name} {result[name]['f1']:.3f}" for name in LABELS)
         print(f"{path}: macro-F1 {result['macro_f1']:.4f}  {per_class}")
 
-    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "model": args.model, "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    if args.save_predictions and held_rows is not None:
+        np.savez_compressed(out / "heldout_predictions.npz", rows=held_rows,
+                            probs=val_probs.numpy().astype(np.float32), labels=y_val.numpy().astype(np.int8),
+                            tau_d=tau)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--train", required=True)
+    parser.add_argument("--val", help="collated JSONL for val; if omitted a holdout is carved from train")
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
+    parser.add_argument("--eval", nargs="*", default=[])
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--batch", type=int, default=1024)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", type=int, nargs="+", help="train once per seed into <out>/seed<N>")
+    parser.add_argument("--cache", help="npz of train embeddings, written on first use and read after")
+    parser.add_argument("--save-predictions", action="store_true",
+                        help="write held-out probabilities to heldout_predictions.npz")
+    args = parser.parse_args()
+    if args.val and args.seeds:
+        parser.error("--seeds varies the held-out split, so it needs the train holdout, not --val")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    embedder = Embedder(args.model, device=str(device))
+
+    print(f"train: {args.train}")
+    if args.cache and Path(args.cache).exists():
+        cached = np.load(args.cache)
+        x_all, y_all = torch.from_numpy(cached["x"]), torch.from_numpy(cached["y"])
+        article, n_articles = cached["article"], int(cached["n_articles"])
+    else:
+        x_all, y_all, article, n_articles = build_features(args.train, embedder)
+        if args.cache:
+            np.savez(args.cache, x=x_all.numpy(), y=y_all.numpy(), article=article, n_articles=n_articles)
+    if args.val:
+        print(f"val: {args.val}")
+        x_val, y_val, _, _ = build_features(args.val, embedder)
+        train_one(args, x_all, y_all, x_val, y_val, args.seed, device, embedder, Path(args.out))
+        return
+    for seed in args.seeds or [args.seed]:
+        fit, held = split_by_article(article, n_articles, args.holdout, seed)
+        print(f"seed {seed}: held out {args.holdout:.0%} of train articles ({int(held.sum())} sentences)")
+        out = Path(args.out) / f"seed{seed}" if args.seeds else Path(args.out)
+        train_one(args, x_all[fit], y_all[fit], x_all[held], y_all[held], seed, device, embedder, out,
+                  held.nonzero()[:, 0].numpy())
 
 
 if __name__ == "__main__":
