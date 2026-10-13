@@ -16,6 +16,8 @@ set is orange in every figure.
     entities.pdf     entity measures of the infilling runs
     differences.pdf  paired differences between infilling systems with 95% intervals
     summary.pdf      the main measures on both train sets
+    control.pdf      heads trained on states extracted with and without evidence
+    transfer.pdf     every head set scored on the held-out features of every set
 
 The numbers the report quotes go to <outputs>/synthetic/analysis.json.
 
@@ -521,12 +523,13 @@ def differences(numbers, out):
     plt.close(fig)
 
 
-def summary(cls, stale, infill, out):
+def summary(cls, stale, infill, out, outputs):
     rows = (("MiniLM baseline, macro-F1", lambda k: cls[k]["MiniLM baseline"]["macro"]),
             ("LLaDA block 32, macro-F1", lambda k: cls[k]["LLaDA block 32"]["macro"]),
             ("LLaDA block 24, macro-F1", lambda k: cls[k]["LLaDA block 24"]["macro"]),
             ("Staleness AUROC", lambda k: stale[k]["auroc"]),
-            ("Staleness precision at tuned $\\tau$", lambda k: stale[k]["tuned"]["precision"]),
+            ("Staleness precision at tuned $\\tau$",
+             lambda k: load(root(outputs, k) / "heads/staleness/metrics.json")["val"]["precision"]),
             ("ROUGE-L, copy", lambda k: infill[k]["copy"]["rougeL"]),
             ("ROUGE-L, oracle masks", lambda k: infill[k]["oracle"]["rougeL"]),
             ("ROUGE-L, predicted masks", lambda k: infill[k]["predicted"]["rougeL"]),
@@ -552,6 +555,86 @@ def summary(cls, stale, infill, out):
     fig.tight_layout()
     fig.savefig(out / "summary.pdf")
     plt.close(fig)
+
+
+def control(outputs, out):
+    """The synthetic heads with evidence in the extraction pass against the same heads without it."""
+    base = outputs / "synthetic"
+    scored = load(base / "transfer.json")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.8, 2.5), gridspec_kw={"width_ratios": [1, 1.15]})
+    variants = (("with evidence", base / "heads", "synthetic", {}),
+                ("without evidence", base / "noev/heads", "noev", {"hatch": "////"}))
+    numbers = {}
+
+    def bars(ax, values, labels, fmt):
+        x = np.arange(len(labels))
+        for k, (name, _, _, style) in enumerate(variants):
+            pos = x + (k - 0.5) * 0.41
+            ax.bar(pos, values[name], 0.38, color=fill("orange") if not style else "white", edgecolor=stroke("orange"),
+                   linewidth=0.8, label=name, **style)
+            for q, v in zip(pos, values[name]):
+                ax.text(q, v + 0.015, fmt.format(v), ha="center", va="bottom", fontsize=6.0)
+        ax.set_xticks(x, labels)
+        ax.set_ylim(0, 1.14)
+        ax.grid(axis="x", visible=False)
+
+    values = {}
+    for name, heads, key, _ in variants:
+        v = held(load(heads / "classifier/layer24/metrics.json"))
+        values[name] = [v[c]["f1"] for c in LABELS] + [v["macro_f1"]]
+        numbers[f"classifier24/{key}"] = dict(zip([*LABELS, "macro"], values[name]))
+    bars(ax1, values, [*LABELS, "macro"], "{:.2f}")
+    ax1.axvspan(2.5, 3.5, color=BAND, zorder=0)
+    ax1.set_ylabel("held-out F1")
+    ax1.legend(loc="upper right", fontsize=6.4, bbox_to_anchor=(1.0, 1.02))
+    title(ax1, "(a) Sentence classifier, block 24")
+
+    measures = (("auroc", "AUROC"), ("pr_auc", "PR-AUC"), ("precision", "precision at\ntuned $\\tau$"),
+                ("top_k_true_count_precision", "top-k\nprecision"))
+    values = {}
+    for name, _, key, _ in variants:
+        r = scored[f"staleness/{key}->{key}"]
+        values[name] = [r[m] for m, _ in measures]
+        numbers[f"staleness/{key}"] = r
+    bars(ax2, values, [n for _, n in measures], "{:.3f}")
+    ax2.tick_params(axis="x", labelsize=6.6)
+    ax2.set_ylabel("held-out score")
+    title(ax2, "(b) Token staleness head")
+    fig.tight_layout(w_pad=1.5)
+    fig.savefig(out / "control.pdf")
+    plt.close(fig)
+    return numbers
+
+
+def transfer(outputs, out):
+    """Heads of one set scored on the held-out features of another, as two matrices."""
+    scored = load(outputs / "synthetic/transfer.json")
+    names = (("fruit", "FRUIT"), ("synthetic", "Synthetic"), ("noev", "Synthetic,\nno evidence"))
+    panels = (("classifier24", "macro_f1", "(a) Sentence classifier, block 24, macro-F1"),
+              ("staleness", "auroc", "(b) Token staleness head, AUROC"))
+    fig, axes = plt.subplots(1, 2, figsize=(6.4, 2.7))
+    cmap = plt.matplotlib.colors.LinearSegmentedColormap.from_list("ramp", ["#FFFFFF", stroke("gray")])
+    for ax, (head, metric, name) in zip(axes, panels):
+        m = np.array([[scored[f"{head}/{a}->{b}"][metric] for b, _ in names] for a, _ in names])
+        low = 1 / 3 if metric == "macro_f1" else 0.5
+        ax.imshow(m, cmap=cmap, vmin=low, vmax=1)
+        for a in range(3):
+            for b in range(3):
+                ax.text(b, a, f"{m[a, b]:.3f}", ha="center", va="center", fontsize=7,
+                        color="white" if m[a, b] > low + 0.6 * (1 - low) else INK)
+        ax.set_xticks(range(3), [n for _, n in names], fontsize=6.6)
+        ax.set_yticks(range(3), [n for _, n in names], fontsize=6.6)
+        ax.set_xlabel("held-out features of")
+        if ax is axes[0]:
+            ax.set_ylabel("heads trained on")
+        ax.grid(visible=False)
+        for side in ax.spines.values():
+            side.set_visible(False)
+        title(ax, name)
+    fig.tight_layout(w_pad=1.5)
+    fig.savefig(out / "transfer.pdf")
+    plt.close(fig)
+    return scored
 
 
 def main():
@@ -583,7 +666,10 @@ def main():
     infilling(numbers["infilling"], out)
     entities(numbers["infilling"], out)
     differences(numbers["infilling"], out)
-    summary(numbers["classifier"], numbers["staleness"], numbers["infilling"], out)
+    summary(numbers["classifier"], numbers["staleness"], numbers["infilling"], out, outputs)
+    if (outputs / "synthetic/transfer.json").exists():
+        numbers["control"] = control(outputs, out)
+        numbers["transfer"] = transfer(outputs, out)
     (outputs / "synthetic/analysis.json").write_text(json.dumps(numbers, indent=1))
     print(f"figures in {out}, numbers in {outputs / 'synthetic/analysis.json'}")
 
