@@ -32,6 +32,7 @@ from collections import Counter
 from pathlib import Path
 
 from classifier.inputs import read_jsonl
+from infilling.evaluate import gold
 
 MENTION_LABELS = {
     "CARDINAL", "DATE", "FAC", "GPE", "LOC", "MONEY", "NORP", "ORDINAL",
@@ -102,8 +103,7 @@ def main():
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
         for edit in result["edits"]:
             j = edit["sentence"]
-            entry = record["labels"][j]
-            target = record["target_sentences"][entry["target_idx"]]["text"]
+            target = gold(record, j, "target")
             source, output = result["source"][j], result["output"][j]
             g, s, o = m(target), m(source), m(output)
             texts = [c["text"] for d in edit["decisions"] for c in d["candidates"]]
