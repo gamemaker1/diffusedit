@@ -98,36 +98,22 @@ class MentionOverlapDetector:
 class EditedAsEvidenceDetector:
     """Using edited sentences as new evidence for cascade detection.
 
+    Paper / progress report:
     "If the evidence holds k snippets in round r and p sentences are edited in
     that round, we append the p edited sentences to the evidence and use the
     k + p snippets in round r + 1. A sentence that a repair made wrong then
     conflicts with a sentence in the evidence, so the existing heads can flag it."
 
-    This class provides both:
-      1. `augment_evidence()`: Appends newly edited/repaired sentences to the
-         evidence snippet list as new evidence snippets for round r + 1.
-      2. `flag()`: Flags candidate sentences outside delta_r that conflict with
-         or directly overlap with the newly appended evidence.
-         - When classifier/staleness heads or a verifier are provided, sentences
-           predicted as EDIT/DROP under the augmented evidence are flagged.
-         - By default, uses mention/lexical conflict with the new evidence snippets.
+    In this strategy, the cascade detector updates the evidence pool:
+      E^{(r+1)} = E^{(r)} ∪ {edited sentences from round r}
+
+    When round r+1 runs its standard forward pass over (E^{(r+1)} ⊕ A^{(r)}),
+    the existing sentence classifier head naturally identifies any sentence
+    that conflicts with the newly introduced evidence.
     """
 
-    def __init__(
-        self,
-        classifier_head: "torch.nn.Module | None" = None,
-        classifier_mean: "torch.Tensor | None" = None,
-        classifier_std: "torch.Tensor | None" = None,
-        tau_d: float = 0.45,
-        title_prefix: str = "Updated Fact (Round {round})",
-        extractor: Extractor | None = None,
-    ):
-        self.classifier_head = classifier_head
-        self.classifier_mean = classifier_mean
-        self.classifier_std = classifier_std
-        self.tau_d = tau_d
+    def __init__(self, title_prefix: str = "Updated Fact (Round {round})"):
         self.title_prefix = title_prefix
-        self.M = extractor or get_extractor()
 
     def augment_evidence(
         self,
@@ -135,16 +121,15 @@ class EditedAsEvidenceDetector:
         repaired_sentences: list[str] | dict[int, str],
         round_idx: int = 1,
     ) -> list[dict]:
-        """Append edited sentences to evidence snippets list.
+        """Append the p edited sentences from round r to the evidence for round r + 1.
 
         Args:
-            evidence: list of existing snippet dicts [{"title": ..., "text": ...}, ...]
-            repaired_sentences: list of edited sentence strings, or dict mapping
-                                sentence_idx -> edited_text.
+            evidence: list of current snippet dicts [{"title": ..., "text": ...}, ...]
+            repaired_sentences: the p sentences edited in round r (list or dict).
             round_idx: current round number r.
 
         Returns:
-            New list of snippets with the p edited sentences appended.
+            Updated list with k + p snippets.
         """
         augmented = list(evidence)
         if isinstance(repaired_sentences, dict):
@@ -169,67 +154,30 @@ class EditedAsEvidenceDetector:
         self,
         sentences: list[str],
         delta_r: set[int],
-        pooled_before: np.ndarray | None = None,
-        pooled_after: np.ndarray | None = None,
-        evidence: list[dict] | None = None,
+        classifier_probs: np.ndarray | None = None,
+        tau_d: float = 0.45,
         **kwargs,
     ) -> set[int]:
-        """Flag sentences outside delta_r that conflict with the newly edited evidence.
+        """Return sentences outside delta_r that round r+1 classifier predicted as EDIT or DROP.
 
-        If classifier_head and pooled_after (computed under augmented evidence)
-        are provided, uses the classifier head to detect sentences classified
-        as EDIT or DROP (Eq. 5).
-        Otherwise, flags sentences that share mentions with the edited sentences
-        now acting as evidence.
+        When round r+1 runs over (E^{(r+1)} ⊕ A^{(r)}), the classifier outputs
+        probabilities for each sentence. Any untouched sentence predicted as
+        EDIT (p_edit > p_keep) or DROP (p_drop >= tau_d) is flagged.
         """
-        import torch
-
-        if not delta_r:
+        if not delta_r or classifier_probs is None:
             return set()
 
         candidates = [k for k in range(len(sentences)) if k not in delta_r]
-        if not candidates:
-            return set()
+        flagged: set[int] = set()
 
-        # If classifier head and fresh pooled states are available
-        if (
-            self.classifier_head is not None
-            and pooled_after is not None
-            and self.classifier_mean is not None
-            and self.classifier_std is not None
-        ):
-            x = torch.from_numpy(pooled_after).float()
-            dev = next(self.classifier_head.parameters()).device if list(self.classifier_head.parameters()) else torch.device("cpu")
-            mean = self.classifier_mean.to(dev)
-            std = self.classifier_std.to(dev)
-            with torch.inference_mode():
-                xb = (x.to(dev) - mean) / std
-                probs = self.classifier_head(xb).softmax(-1).cpu().numpy()
-
-            flagged: set[int] = set()
-            for k in candidates:
-                p_keep, p_edit, p_drop = probs[k]
-                # If predicted EDIT or passing the DROP gate
-                if p_drop >= self.tau_d or p_edit > p_keep:
-                    flagged.add(k)
-            return flagged
-
-        # Fallback / heuristic when running directly on text:
-        # Check mention overlap between candidate sentences and the newly edited sentences
-        edited_mentions: set[str] = set()
-        for j in delta_r:
-            if j < len(sentences):
-                edited_mentions |= self.M(sentences[j])
-
-        if not edited_mentions:
-            return set()
-
-        flagged = set()
         for k in candidates:
-            if self.M(sentences[k]) & edited_mentions:
+            if k >= len(classifier_probs):
+                continue
+            p_keep, p_edit, p_drop = classifier_probs[k]
+            if p_drop >= tau_d or p_edit > p_keep:
                 flagged.add(k)
-        return flagged
 
+        return flagged
 
 # ---------------------------------------------------------------------------
 # (c) Staleness Delta Detector
