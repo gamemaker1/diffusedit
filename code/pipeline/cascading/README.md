@@ -11,13 +11,13 @@ When an article says *"Three people died and the small death toll limited the po
 ```
 cascading/
 ├── mentions.py    M(text): named entity + digit string extractor (Section 7.3)
-├── detectors.py   Three cascade detectors: (a) mention overlap, (b) staleness delta, (c) consequence prediction
+├── detectors.py   Four cascade detectors: (a) mention overlap, (b) edited as evidence, (c) staleness delta, (d) consequence prediction
 ├── train.py       ConsequenceHead training — Equation 8
 ├── mine.py        Cascade pair mining from silver training data (Section 8.5)
 └── evaluate.py    Cascade recall evaluation on hand-labeled pairs (Section 9.2)
 ```
 
-## Three Detectors
+## Four Detectors
 
 ### (a) Mention Overlap — `MentionOverlapDetector`
 No training. Flags sentence `s_k` when its mention set `M(s_k)` shares at least one string with the mentions of any sentence repaired this round. High recall, low precision baseline.
@@ -26,14 +26,20 @@ No training. Flags sentence `s_k` when its mention set `M(s_k)` shares at least 
 # No training needed — use directly in infilling.run
 ```
 
-### (b) Staleness Delta — `StalenessDeltaDetector`
+### (b) Using Edited Sentences as New Evidence — `EditedAsEvidenceDetector`
+If the evidence holds $k$ snippets in round $r$ and $p$ sentences are edited in that round, we append the $p$ edited sentences to the evidence and use the $k + p$ snippets in round $r + 1$. A sentence that a repair made wrong then conflicts with a sentence in the evidence, so the existing heads can flag it.
+
+- `detector.augment_evidence(evidence, repaired_sentences, round_idx)`: Appends newly repaired sentences as snippets to the evidence.
+- `detector.flag(...)`: Flags candidate sentences that conflict with the augmented evidence or share key entities with the new snippets.
+
+### (c) Staleness Delta — `StalenessDeltaDetector`
 No training. Re-scores every sentence under the fresh hidden states (after repairs) and flags sentences whose staleness score rose into the top 10th percentile and crosses `τ_2`. Requires the existing staleness head.
 
 ```bash
 # No training needed — requires --staleness-head from staleness.train
 ```
 
-### (c) Consequence Prediction — `ConsequenceDetector`
+### (d) Consequence Prediction — `ConsequenceDetector`
 Trained head (Equation 8). For each repaired sentence `s_j` and each unrepaired sentence `s_k`:
 
 ```

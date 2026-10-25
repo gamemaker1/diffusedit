@@ -85,25 +85,32 @@ def main():
                         help="JSONL of hand-labeled cascade sentences")
     parser.add_argument("--features", required=True,
                         help="feature directory from classifier.extract")
-    parser.add_argument("--detector", choices=["mention", "staleness_delta", "consequence"],
+    parser.add_argument("--detector", choices=["mention", "edited_as_evidence", "evidence", "staleness_delta", "consequence"],
                         default="mention",
                         help="which cascade detector to evaluate")
     parser.add_argument("--cascade-head", default=None,
                         help="path to trained cascade head dir (for --detector consequence)")
+    parser.add_argument("--classifier-head", default=None,
+                        help="path to trained classifier head dir (for --detector edited_as_evidence)")
     parser.add_argument("--staleness-head", default=None,
                         help="path to staleness head .pt (for --detector staleness_delta)")
     parser.add_argument("--tau2", type=float, default=0.5,
                         help="staleness delta threshold τ_2")
     parser.add_argument("--tau-c", type=float, default=0.5,
                         help="consequence detection threshold τ_c")
+    parser.add_argument("--tau-d", type=float, default=0.45,
+                        help="classifier DROP/EDIT threshold τ_d (for edited_as_evidence)")
     parser.add_argument("--out", required=True,
                         help="output JSON path for evaluation results")
     args = parser.parse_args()
 
     import torch
     from cascading.detectors import (
-        MentionOverlapDetector, StalenessDeltaDetector,
-        ConsequenceDetector, load_consequence_head,
+        ConsequenceDetector,
+        EditedAsEvidenceDetector,
+        MentionOverlapDetector,
+        StalenessDeltaDetector,
+        load_consequence_head,
     )
     from cascading.train import load_features
 
@@ -135,6 +142,23 @@ def main():
     # Build detector
     if args.detector == "mention":
         detector = MentionOverlapDetector()
+    elif args.detector in ("edited_as_evidence", "evidence"):
+        cls_head = None
+        cls_mean, cls_std = None, None
+        if args.classifier_head:
+            ckpt = torch.load(Path(args.classifier_head) / "head.pt", map_location=device)
+            w = ckpt["state_dict"]["weight"]
+            cls_head = torch.nn.Linear(w.shape[1], w.shape[0]).to(device)
+            cls_head.load_state_dict(ckpt["state_dict"])
+            cls_head.eval()
+            cls_mean = ckpt.get("mean")
+            cls_std = ckpt.get("std")
+        detector = EditedAsEvidenceDetector(
+            classifier_head=cls_head,
+            classifier_mean=cls_mean,
+            classifier_std=cls_std,
+            tau_d=args.tau_d,
+        )
     elif args.detector == "staleness_delta":
         if not args.staleness_head:
             raise SystemExit("--staleness-head required for staleness_delta detector")
