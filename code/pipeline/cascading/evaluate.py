@@ -1,43 +1,46 @@
-"""Cascade recall evaluation — Section 9.2.
+"""Cascade recall of one detector after an oracle repair of the direct edits (Section 9.2).
 
-Measures how many true cascade sentences each detector flags (cascade recall),
-broken into two groups per the paper:
-  - Group A: cascade sentences that share a mention with a direct edit
-             (Detector (a) — mention overlap — can catch these)
-  - Group B: cascade sentences with no shared mention
-             (only Detector (c) — consequence prediction — can catch these)
+The evaluation simulates one round of Algorithm 1. The round repairs the
+direct edits of each article with their gold rewrites and nothing else, so Δ
+is the direct set and every cascade sentence is still unrepaired. The detector then
+flags sentences outside Δ, and cascade recall is the fraction of cascade
+sentences it flags, reported for cascades that share a mention with a direct
+edit (Group A) and for those that do not (Group B). Mention overlap flags
+only sentences that share a mention string, so its Group B recall is 0.
 
-Input: a hand-labeled eval file (TSV or JSONL) and an infilling run's
-results.jsonl (to obtain the delta_r sets and re-encoded hidden states).
+The detectors read these inputs.
 
-Labeled eval file format (JSONL, one record per article):
+    mention             the sentences after the round, and their versions
+                        before it
+    staleness_delta     the staleness head over --features (before) and
+                        --features-after (the after view of cascading.views)
+    consequence         the consequence head with u_j from --features-after
+                        and u_k from --features
+    edited_as_evidence  the classifier head over --features-evidence (the
+                        evidence view of cascading.views)
+
+Labels file (JSONL, one record per article, from cascading.links or by hand):
     {
         "article_id": str,
+        "direct": [int, ...],       // when absent, the record's "changes"
         "cascade_sentences": [
-            {
-                "sentence_idx": int,
-                "label": "cascade"|"stylistic",   // hand label
-                "shares_mention_with_direct": bool
-            },
+            {"sentence_idx": int, "label": "cascade"|"stylistic",
+             "shares_mention_with_direct": bool},
             ...
         ]
     }
 
-Usage:
-    python -m cascading.evaluate \\
-        --data datasets/collated/train.jsonl \\
-        --labels pairs/eval_labels.jsonl \\
-        --features features/train \\
-        --detector mention \\
-        --out eval/cascade_recall.json
+Precision counts every flagged sentence that is not a labelled cascade as a
+false flag. That holds for synthetic links, where every cascade is labelled.
+On hand-labelled FRUIT sentences it is a lower bound.
 
-    python -m cascading.evaluate \\
-        --data datasets/collated/train.jsonl \\
-        --labels pairs/eval_labels.jsonl \\
-        --features features/train \\
-        --detector consequence \\
-        --cascade-head heads/cascade \\
-        --out eval/cascade_recall_consequence.json
+Usage:
+    python -m cascading.evaluate --data ../datasets/synthetic/cascades.jsonl \\
+        --labels pairs/synthetic/labels.jsonl --detector mention --out eval/mention.json
+    python -m cascading.evaluate --data ../datasets/synthetic/cascades.jsonl \\
+        --labels pairs/synthetic/labels.jsonl --detector consequence \\
+        --features features/cascades --features-after features/cascades-after \\
+        --cascade-head heads/cascade --out eval/consequence.json
 """
 
 import argparse
@@ -46,214 +49,140 @@ from pathlib import Path
 
 import numpy as np
 
+from cascading.links import direct, target
+from classifier.inputs import read_jsonl
 
-def load_jsonl(path: str | Path) -> list[dict]:
-    records = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
-
-
-def precision_recall(flagged: set[int], true_cascade: set[int], n_sentences: int) -> dict:
-    """Compute precision and recall for cascade detection on one article."""
-    tp = len(flagged & true_cascade)
-    fp = len(flagged - true_cascade)
-    fn = len(true_cascade - flagged)
-    precision = tp / (tp + fp) if (tp + fp) > 0 else None
-    recall    = tp / (tp + fn) if (tp + fn) > 0 else None
-    return {"tp": tp, "fp": fp, "fn": fn,
-            "precision": precision, "recall": recall}
+DETECTORS = ("mention", "edited_as_evidence", "staleness_delta", "consequence")
+NEEDS = {
+    "staleness_delta": ("features", "features_after", "staleness_head"),
+    "consequence": ("features", "features_after", "cascade_head"),
+    "edited_as_evidence": ("features_evidence", "classifier_head"),
+}
 
 
-def macro_recall(article_results: list[dict]) -> float | None:
-    """Mean recall over articles that have at least one true cascade."""
-    vals = [r["recall"] for r in article_results if r["recall"] is not None]
-    return float(np.mean(vals)) if vals else None
+class Rows:
+    """Pooled sentence vectors of one classifier.extract directory, sliced per article."""
+
+    def __init__(self, directory, layer):
+        from cascading.train import first_rows, load_features
+        self.ids = json.loads((Path(directory) / "ids.json").read_text())
+        self.x, article, _ = load_features(directory, layer)
+        self.starts = first_rows(directory)
+        self.ends = {self.ids[a]: int(r) + 1 for r, a in enumerate(article)}
+
+    def __getitem__(self, article_id):
+        return np.asarray(self.x[self.starts[article_id]:self.ends[article_id]], dtype=np.float32)
+
+
+def linear_head(path, device):
+    """A Linear head saved by classifier.train or staleness.train, with its standardization and layer."""
+    import torch
+    ckpt = torch.load(path, map_location=device)
+    weight = ckpt["state_dict"]["weight"]
+    head = torch.nn.Linear(weight.shape[1], weight.shape[0]).to(device)
+    head.load_state_dict(ckpt["state_dict"])
+    return head.eval(), ckpt["mean"].to(device), ckpt["std"].to(device), ckpt
+
+
+def build(args, device):
+    """The detector, the feature layer it reads, and the classifier head for edited_as_evidence."""
+    from cascading.detectors import (ConsequenceDetector, EditedAsEvidenceDetector,
+                                     MentionOverlapDetector, StalenessDeltaDetector,
+                                     load_consequence_head)
+    if args.detector == "mention":
+        return MentionOverlapDetector(), None, None
+    if args.detector == "staleness_delta":
+        head, mean, std, ckpt = linear_head(args.staleness_head, "cpu")
+        return StalenessDeltaDetector(head, mean, std, tau2=args.tau2), ckpt["layer"], None
+    if args.detector == "consequence":
+        head, config = load_consequence_head(args.cascade_head, device=device)
+        return ConsequenceDetector(head.cpu(), tau_c=args.tau_c), config["layer"], None
+    head, mean, std, ckpt = linear_head(args.classifier_head, "cpu")
+    return EditedAsEvidenceDetector(), ckpt["layer"], (head, mean, std)
+
+
+def classifier_probs(head, mean, std, pooled):
+    import torch
+    with torch.inference_mode():
+        return head((torch.from_numpy(pooled) - mean) / std).softmax(-1).numpy()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--data", required=True,
-                        help="collated JSONL (same split used for features)")
-    parser.add_argument("--labels", required=True,
-                        help="JSONL of hand-labeled cascade sentences")
-    parser.add_argument("--features", required=True,
-                        help="feature directory from classifier.extract")
-    parser.add_argument("--detector", choices=["mention", "edited_as_evidence", "evidence", "staleness_delta", "consequence"],
-                        default="mention",
-                        help="which cascade detector to evaluate")
-    parser.add_argument("--cascade-head", default=None,
-                        help="path to trained cascade head dir (for --detector consequence)")
-    parser.add_argument("--classifier-head", default=None,
-                        help="path to trained classifier head dir (for --detector edited_as_evidence)")
-    parser.add_argument("--staleness-head", default=None,
-                        help="path to staleness head .pt (for --detector staleness_delta)")
-    parser.add_argument("--tau2", type=float, default=0.5,
-                        help="staleness delta threshold τ_2")
-    parser.add_argument("--tau-c", type=float, default=0.5,
-                        help="consequence detection threshold τ_c")
-    parser.add_argument("--tau-d", type=float, default=0.45,
-                        help="classifier DROP/EDIT threshold τ_d (for edited_as_evidence)")
-    parser.add_argument("--out", required=True,
-                        help="output JSON path for evaluation results")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", required=True, help="the dataset the features were extracted from")
+    parser.add_argument("--labels", required=True, help="cascade labels JSONL")
+    parser.add_argument("--detector", choices=DETECTORS, default="mention")
+    parser.add_argument("--features", help="features of the source articles")
+    parser.add_argument("--features-after", help="features of the after view")
+    parser.add_argument("--features-evidence", help="features of the evidence view")
+    parser.add_argument("--cascade-head", help="directory of cascading.train")
+    parser.add_argument("--classifier-head", help="head.pt of classifier.train")
+    parser.add_argument("--staleness-head", help="head.pt of staleness.train")
+    parser.add_argument("--tau2", type=float, default=0.5, help="staleness delta threshold")
+    parser.add_argument("--tau-c", type=float, default=0.5, help="consequence threshold")
+    parser.add_argument("--out", required=True, help="output JSON path")
     args = parser.parse_args()
+    missing = [f"--{n.replace('_', '-')}" for n in NEEDS.get(args.detector, ()) if not getattr(args, n)]
+    if missing:
+        parser.error(f"--detector {args.detector} needs {' '.join(missing)}")
 
     import torch
-    from cascading.detectors import (
-        ConsequenceDetector,
-        EditedAsEvidenceDetector,
-        MentionOverlapDetector,
-        StalenessDeltaDetector,
-        load_consequence_head,
-    )
-    from cascading.train import load_features
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    detector, layer, classifier = build(args, device)
+    before = Rows(args.features, layer) if args.features and layer else None
+    after = Rows(args.features_after, layer) if args.features_after and layer else None
+    evidence = Rows(args.features_evidence, layer) if args.features_evidence and layer else None
 
-    # Load features
-    print(f"Loading features from {args.features}...")
-    features, article_arr, labels_arr = load_features(args.features)
-    ids_list = json.loads((Path(args.features) / "ids.json").read_text())
-
-    # Build article_id → row slice mapping
-    art_to_rows: dict[str, tuple[int, int]] = {}
-    cur_art, start = None, 0
-    for row, art_i in enumerate(article_arr):
-        aid = ids_list[art_i]
-        if aid != cur_art:
-            if cur_art is not None:
-                art_to_rows[cur_art] = (start, row)
-            cur_art, start = aid, row
-    if cur_art is not None:
-        art_to_rows[cur_art] = (start, len(article_arr))
-
-    # Build data records index
-    data_records = {r["id"]: r for r in load_jsonl(args.data)}
-
-    # Load labeled eval set
-    eval_labels = load_jsonl(args.labels)
-
-    # Build detector
-    if args.detector == "mention":
-        detector = MentionOverlapDetector()
-    elif args.detector in ("edited_as_evidence", "evidence"):
-        cls_head = None
-        cls_mean, cls_std = None, None
-        if args.classifier_head:
-            ckpt = torch.load(Path(args.classifier_head) / "head.pt", map_location=device)
-            w = ckpt["state_dict"]["weight"]
-            cls_head = torch.nn.Linear(w.shape[1], w.shape[0]).to(device)
-            cls_head.load_state_dict(ckpt["state_dict"])
-            cls_head.eval()
-            cls_mean = ckpt.get("mean")
-            cls_std = ckpt.get("std")
-        detector = EditedAsEvidenceDetector(
-            classifier_head=cls_head,
-            classifier_mean=cls_mean,
-            classifier_std=cls_std,
-            tau_d=args.tau_d,
-        )
-    elif args.detector == "staleness_delta":
-        if not args.staleness_head:
-            raise SystemExit("--staleness-head required for staleness_delta detector")
-        ckpt = torch.load(args.staleness_head, map_location=device)
-        head = torch.nn.Linear(ckpt["state_dict"]["weight"].shape[1], 1).to(device)
-        head.load_state_dict(ckpt["state_dict"])
-        head.eval()
-        detector = StalenessDeltaDetector(
-            staleness_head=head,
-            mean=ckpt["mean"].to(device),
-            std=ckpt["std"].to(device),
-            tau2=args.tau2,
-        )
-    else:  # consequence
-        if not args.cascade_head:
-            raise SystemExit("--cascade-head required for consequence detector")
-        cascade_head, _ = load_consequence_head(args.cascade_head, device=device)
-        detector = ConsequenceDetector(head=cascade_head, tau_c=args.tau_c)
-
-    # Evaluate per article
-    group_a: list[dict] = []   # share mention with direct edit
-    group_b: list[dict] = []   # no shared mention
-
-    for article_eval in eval_labels:
-        aid = article_eval["article_id"]
-        if aid not in art_to_rows or aid not in data_records:
+    labels = {row["article_id"]: row for row in read_jsonl(args.labels)}
+    groups = {"shared": [0, 0], "unshared": [0, 0]}
+    flags = {"flagged": 0, "flagged_cascades": 0, "candidates": 0, "articles": 0}
+    for record in read_jsonl(args.data):
+        row = labels.get(record["id"])
+        if row is None:
             continue
+        delta = set(row.get("direct", direct(record)))
+        previous = [s.strip() for s in record["source_sentences"]]
+        current = [target(record, j) if j in delta else s for j, s in enumerate(previous)]
+        inputs = {"previous": previous}
+        if before is not None:
+            inputs["pooled_before"] = before[record["id"]]
+        if after is not None:
+            inputs["pooled_after"] = after[record["id"]]
+        if evidence is not None:
+            inputs["classifier_probs"] = classifier_probs(*classifier, evidence[record["id"]])
+        flagged = detector.flag(current, delta, **inputs)
 
-        r0, r1 = art_to_rows[aid]
-        record = data_records[aid]
-        sentences = record["source_sentences"]
-        labels_raw = record["labels"]
-        n = len(sentences)
+        cascades = [c for c in row["cascade_sentences"] if c["label"] == "cascade"]
+        for c in cascades:
+            group = groups["shared" if c["shares_mention_with_direct"] else "unshared"]
+            group[0] += c["sentence_idx"] in flagged
+            group[1] += 1
+        flags["flagged"] += len(flagged)
+        flags["flagged_cascades"] += len(flagged & {c["sentence_idx"] for c in cascades})
+        flags["candidates"] += len(previous) - len(delta)
+        flags["articles"] += 1
 
-        # delta_r = all EDIT and DROP sentences (oracle labels for the eval)
-        delta_r = {i for i, lbl in enumerate(labels_raw)
-                   if lbl.get("label") in ("EDIT", "DROP")}
-
-        pooled = features[r0:r1]   # [n_sents, d]
-        # Use same pooled for before/after (no actual repair state available for eval)
-        flagged = detector.flag(
-            sentences=sentences,
-            delta_r=delta_r,
-            pooled_before=pooled,
-            pooled_after=pooled,
-        )
-
-        # Score against labeled cascades
-        for entry in article_eval["cascade_sentences"]:
-            if entry["label"] != "cascade":
-                continue
-            sidx = entry["sentence_idx"]
-            true_set = {sidx}
-            result = precision_recall(flagged, true_set, n)
-            result["article_id"] = aid
-            result["sentence_idx"] = sidx
-            result["shares_mention"] = entry["shares_mention_with_direct"]
-            if entry["shares_mention_with_direct"]:
-                group_a.append(result)
-            else:
-                group_b.append(result)
-
-    # Aggregate
-    def agg(group: list[dict]) -> dict:
-        return {
-            "n_sentences": len(group),
-            "cascade_recall": macro_recall(group),
-            "tp_total": sum(r["tp"] for r in group),
-            "fn_total": sum(r["fn"] for r in group),
-            "fp_total": sum(r["fp"] for r in group),
-        }
+    def ratio(a, b):
+        return a / b if b else None
 
     results = {
-        "detector": args.detector,
-        "tau_c": args.tau_c,
-        "tau2": args.tau2,
-        "group_a_shared_mention": agg(group_a),
-        "group_b_no_shared_mention": agg(group_b),
-        "overall": agg(group_a + group_b),
+        "detector": args.detector, "tau_c": args.tau_c, "tau2": args.tau2, **flags,
+        "group_a_shared_mention": {"cascades": groups["shared"][1], "recall": ratio(*groups["shared"])},
+        "group_b_no_shared_mention": {"cascades": groups["unshared"][1], "recall": ratio(*groups["unshared"])},
+        "recall": ratio(groups["shared"][0] + groups["unshared"][0], groups["shared"][1] + groups["unshared"][1]),
+        "precision": ratio(flags["flagged_cascades"], flags["flagged"]),
+        "flag_rate": ratio(flags["flagged"], flags["candidates"]),
     }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=2))
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(results, indent=2))
-
-    # Print summary
-    print(f"\n{'='*60}")
-    print(f"Detector: {args.detector}")
-    print(f"Group A (shared mention):   n={results['group_a_shared_mention']['n_sentences']}  "
-          f"cascade recall={results['group_a_shared_mention']['cascade_recall']}")
-    print(f"Group B (no shared mention):n={results['group_b_no_shared_mention']['n_sentences']}  "
-          f"cascade recall={results['group_b_no_shared_mention']['cascade_recall']}")
-    print(f"Overall:                    n={results['overall']['n_sentences']}  "
-          f"cascade recall={results['overall']['cascade_recall']}")
-    print(f"Saved to {out_path}")
+    def fmt(v):
+        return f"{v:.3f}" if v is not None else "-"
+    print(f"{args.detector}: {flags['articles']} articles, recall {fmt(results['recall'])}, "
+          f"precision {fmt(results['precision'])}, flag rate {fmt(results['flag_rate'])}")
+    print(f"  group A (shared mention)    n={groups['shared'][1]}  recall {fmt(results['group_a_shared_mention']['recall'])}")
+    print(f"  group B (no shared mention) n={groups['unshared'][1]}  recall {fmt(results['group_b_no_shared_mention']['recall'])}")
 
 
 if __name__ == "__main__":
