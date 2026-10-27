@@ -46,6 +46,9 @@ class SyntheticRecord:
     source_sentences: list[str]
     labels: list[SentenceLabel]
     target_sentences: list[str] = field(default_factory=list)
+    # One {"direct": j, "cascade": k} link per injected cascade pair: sentence k
+    # must change only because sentence j changed.
+    cascades: list[dict[str, int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         targets = self.target_sentences or [l.target for l in self.labels if l.label != "DROP"]
@@ -56,6 +59,7 @@ class SyntheticRecord:
             "target": " ".join(targets),
             "target_sentences": list(targets),
             "labels": [l.to_dict() for l in self.labels],
+            "cascades": [dict(c) for c in self.cascades],
         }
 
     def to_json(self) -> str:
@@ -78,6 +82,7 @@ class SyntheticRecord:
             source_sentences=data["source_sentences"],
             labels=labels,
             target_sentences=data.get("target_sentences", []),
+            cascades=data.get("cascades", []),
         )
 
     def validate(self) -> tuple[bool, str | None]:

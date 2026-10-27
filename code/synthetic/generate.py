@@ -210,12 +210,18 @@ class SyntheticGenerator:
 
         target_sentences = [lbl.target for lbl in labels if lbl.label != "DROP"]
 
+        cascades = []
+        if cascade_pair:
+            cascades.append({"direct": cascade_pair.direct_sentence_idx,
+                             "cascade": cascade_pair.cascade_sentence_idx})
+
         return SyntheticRecord(
             id=record_id,
             evidence=evidence,
             source_sentences=source_sentences,
             labels=labels,
             target_sentences=target_sentences,
+            cascades=cascades,
         )
 
     def generate_dataset(self, n_records: int, prefix: str = "synthetic-") -> list[SyntheticRecord]:
