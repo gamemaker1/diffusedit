@@ -1,0 +1,452 @@
+\documentclass[]{paper}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+
+\newcommand{\keep}{\textsc{keep}}
+\newcommand{\edit}{\textsc{edit}}
+\newcommand{\drop}{\textsc{drop}}
+
+\begin{document}
+
+\title{Synthetic against FRUIT}
+
+\author[*]{Tatva Agarwal}
+\author[*]{Vedant Kulkarni}
+\author[*]{Bysani Vedavyas}
+\author[*]{Venya Velmurugan}
+
+\affiliation[]{IIIT Hyderabad}
+
+\contribution[*]{Equal contribution; authors listed alphabetically.}
+
+\abstract{
+In the progress report, heads trained on FRUIT-Wiki labels read little from frozen LLaDA-8B hidden states. The sentence classifier reached macro-F1 0.499 and the token staleness head AUROC 0.645. This report repeats the same pipeline on a synthetic train set of 9,183 articles with exact labels and evidence that states every change. The classifier reaches macro-F1 0.870 and the staleness head AUROC 0.993, and infilling with the head's masks beats the unchanged sentence by 0.058 ROUGE-L. A control that removes the evidence from feature extraction shows where the scores come from. The staleness head still reaches AUROC 0.976, so it finds the synthetic swaps mostly because they are unlikely in context. The classifier falls to macro-F1 0.564 and loses all of its \drop{} score, so it does read the evidence. The synthetic heads do not transfer to FRUIT.
+}
+
+\date{October 14, 2026}
+\correspondence{\email{vedant.kulkarni@students.iiit.ac.in}}
+
+\maketitle{}
+
+\section{Question}
+\label{sec:intro}
+
+DiffusEdit labels each sentence of an outdated article \keep{}, \edit{} or \drop{}, masks the stale tokens of each \edit{} sentence, and infills the masks with a frozen masked diffusion model, LLaDA-8B \citep{nie-etal-2025-llada}. Both the sentence classifier and the token staleness head are linear layers on the frozen model's hidden states.
+
+On FRUIT-Wiki \citep{iv-etal-2022-fruit} both heads scored low. FRUIT labels come from an automatic alignment, and 17\% of its edits are supported by the evidence. The low scores therefore have two possible causes. Either the frozen states lack the information, or the supervision hides it. This report trains the same heads on a set with exact labels and complete evidence to tell the two apart. The measures are those of the progress report. \Cref{app:tables} holds the full tables. FRUIT is blue and the synthetic set is orange in every figure.
+
+\section{Data}
+\label{sec:data}
+
+The synthetic set starts from Wikipedia sentences, which serve as gold text.
+
+\paragraph{Corruption.} For an \edit{} sentence, \texttt{datasets/synthetic/rebuild.py} replaces one to three named entities with entities of the same spaCy type drawn from other articles. The replaced spans are the stale spans, so the token labels are exact. A \drop{} sentence is a gold sentence that the target article omits.
+
+\paragraph{Evidence.} Language model agents (Claude Sonnet~5.5) wrote the evidence as excerpts of other documents, such as encyclopedia articles and news clippings. For an \edit{} sentence a passage states the correct fact. For a \drop{} sentence a passage gives a reason why the sentence no longer holds. About half of the \keep{} sentences get a consistent passage, so a related passage does not signal a change. \texttt{datasets/synthetic/merge.py} rejects an article if a passage copies seven consecutive words of a sentence or omits a corrected value. 9,183 of 10,000 articles pass.
+
+\Cref{tab:data} compares the result with a FRUIT sample of the same size. A linear probe on surface features (sentence words and string matches with the evidence) reaches macro-F1 0.418 on the synthetic set and 0.437 on FRUIT, against 0.333 for a uniform guess. The form of the synthetic set therefore does not reveal its labels.
+
+\begin{table}[H]
+\caption{The synthetic train set and a random sample of the FRUIT train set of the same number of articles.}
+\label{tab:data}
+\centering
+\footnotesize
+\begin{tabular}{lrr}
+\toprule
+ & FRUIT sample & Synthetic \\
+\midrule
+Articles & 9,183 & 9,183 \\
+Sentences & 42,219 & 31,315 \\
+\quad\keep{} / \edit{} / \drop{} & 45.0\% / 42.0\% / 13.0\% & 59.5\% / 37.7\% / 2.8\% \\
+Evidence passages per article & 6.12 & 2.18 \\
+Mean stale share of an \edit{} sentence's characters & 26.7\% & 15.6\% \\
+\edit{} sentences with new words that are supported & 17.2\% & 99.9\% \\
+Label source & aligner (silver) & construction (exact) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+\label{sec:results}
+
+The runs use the scripts, model revision and settings of the FRUIT runs. Every head holds out 10\% of the articles (3,116 sentences and 34,049 tokens on the synthetic set). Infilling runs on 50 held-out articles of each set.
+
+\Cref{tab:results} and \Cref{fig:summary} give the scores of both sets.
+
+\begin{table}[H]
+\caption{Held-out scores of the same pipeline trained on each set. Classifier and staleness scores are from seed 42. Infilling scores are from 50 supported articles of each set, with 106 repaired sentences on FRUIT and 99 on the synthetic set.}
+\label{tab:results}
+\centering
+\footnotesize
+\begin{tabular}{llcc}
+\toprule
+Component & Measure & FRUIT & Synthetic \\
+\midrule
+Sentence classifier & Macro-F1, MiniLM baseline & 0.433 & 0.443 \\
+ & Macro-F1, LLaDA block 24 & 0.499 & \textbf{0.870} \\
+ & Macro-F1, LLaDA block 32 & 0.490 & 0.708 \\
+ & \drop{} F1, LLaDA block 24 & 0.315 & 0.742 \\
+\midrule
+Token staleness head & AUROC & 0.645 & \textbf{0.993} \\
+ & Precision / recall at the tuned threshold & 0.344 / 0.789 & 0.935 / 0.898 \\
+ & Share of tokens masked / stale & 65.3\% / 28.5\% & 14.3\% / 14.9\% \\
+\midrule
+Infilling, ROUGE-L & Unchanged sentence & 0.782 & 0.867 \\
+ & Oracle masks & 0.801 & \textbf{0.940} \\
+ & Oracle masks, no evidence & 0.779 & 0.905 \\
+ & Predicted masks & 0.678 & 0.926 \\
+Infilling, new-entity recall & Oracle masks & 0.218 & 0.635 \\
+ & Oracle masks, no evidence & 0.084 & 0.346 \\
+ & Predicted masks & 0.134 & 0.610 \\
+Infilling, fabricated entities & Oracle masks & 14.4\% & 14.9\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/summary.pdf}
+\caption{Held-out scores of the same pipeline trained on each set.}
+\label{fig:summary}
+\end{figure}
+
+\paragraph{Classifier.} LLaDA at block 24 reaches macro-F1 0.870, against 0.499 on FRUIT. Over five seeds the mean is $0.849 \pm 0.015$. The MiniLM baseline, which uses no LLaDA states, stays at its FRUIT level. Block 24 exceeds block 32 by 0.162, where on FRUIT the two were 0.009 apart. \drop{} is the weakest class, and 18 of its 84 held-out sentences are labelled \edit{}.
+
+\paragraph{Staleness head.} \Cref{fig:scores} shows the token scores. On FRUIT the scores of stale and correct tokens overlap. On the synthetic set 81\% of stale tokens score above 0.96 and 66\% of correct tokens below 0.04. The tuned threshold now masks about as many tokens as are stale.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/stale_scores.pdf}
+\caption{Staleness scores of held-out tokens. (a) and (b)~Score distribution of stale and correct tokens on each set, with the tuned threshold as a dashed line. The y axes differ. (c)~Share of tokens that are stale per score bin.}
+\label{fig:scores}
+\end{figure}
+
+\paragraph{Infilling.} With the head's masks, ROUGE-L rises from 0.867 to 0.926, and the output contains 61.0\% of the entities the update adds. Both differences from the unchanged sentence have Holm-corrected $p = 0.003$ in a paired test over articles. On FRUIT the same masks lowered ROUGE-L by 0.105. Oracle masks lead predicted masks by 0.014 ROUGE-L. Removing the evidence from the infilling input lowers new-entity recall from 0.635 to 0.346. Two FRUIT results do not change. About 15\% of output entities are fabricated, and the best candidate in the pool has 0.13 more new-entity recall than the one the reranker picks.
+
+\section{Controls}
+\label{sec:control}
+
+\paragraph{Extraction without evidence.} Feature extraction normally reads the evidence and then the article. The control reads the article alone, and the same heads train on those states. \Cref{tab:control} and \Cref{fig:control} give the result.
+
+The staleness head loses little. Its AUROC falls from 0.993 to 0.976. A replacement entity matches only the type that spaCy assigned, so many replacements are unlikely in their context, as in ``started on Solaris 11''. The head finds them without the evidence.
+
+The classifier loses 0.306 macro-F1. Its \drop{} F1 falls from 0.742 to 0.075, because a dropped sentence is an ordinary correct sentence that only the evidence marks. Its \edit{} F1 falls by 0.083 only, since the same implausible swaps identify \edit{} sentences.
+
+\begin{table}[H]
+\caption{Synthetic heads trained on states extracted with and without the evidence, on the same held-out articles (seed 42).}
+\label{tab:control}
+\centering
+\footnotesize
+\begin{tabular}{llcc}
+\toprule
+Head & Measure & With evidence & Without evidence \\
+\midrule
+Sentence classifier, block 24 & Macro-F1 & \textbf{0.870} & 0.564 \\
+ & \keep{} / \edit{} / \drop{} F1 & 0.946 / 0.921 / 0.742 & 0.780 / 0.838 / 0.075 \\
+Token staleness head & AUROC & \textbf{0.993} & 0.976 \\
+ & Precision / recall at the tuned threshold & 0.935 / 0.898 & 0.800 / 0.826 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/control.pdf}
+\caption{Synthetic heads trained on states extracted with the evidence (filled) and without it (hatched). (a)~Block-24 sentence classifier. (b)~Token staleness head.}
+\label{fig:control}
+\end{figure}
+
+\paragraph{Transfer.} Each set of heads was also scored on the held-out features of the other set. The synthetic classifier reaches macro-F1 0.349 on FRUIT, below the 0.499 of the FRUIT head and near a uniform guess. The synthetic staleness head reaches AUROC 0.526 there. In the other direction the FRUIT staleness head reaches AUROC 0.814 on the synthetic tokens, above its 0.645 on FRUIT, which again shows that the swaps are easy to find.
+
+\section{Findings}
+\label{sec:findings}
+
+\begin{enumerate}
+\item The frozen states carry the comparison between a sentence and the evidence. With exact labels the classifier reaches macro-F1 0.870, and removing the evidence costs it 0.306 and all of \drop{}.
+\item The staleness score on this set mostly measures how detectable the corruptions are. Without evidence the head still reaches AUROC 0.976.
+\item The synthetic heads do not transfer to FRUIT.
+\item Infilling needs the evidence, and with usable masks it improves on the unchanged sentence. On FRUIT the staleness head's masks made the output worse.
+\item Fabricated entities and the gap between the reranker and the best candidate are the same on both sets.
+\end{enumerate}
+
+\paragraph{Limitations.} Every synthetic edit is an entity swap, and the corrected value appears verbatim in a passage. The set has 874 \drop{} sentences, so the held-out \drop{} score rests on 84 sentences. The reasons in the \drop{} passages are invented. The infilling runs use 50 articles, one round and the sentence labels of the data.
+
+\paragraph{Next steps.} The first step is harder corruptions. Replacements drawn from the same or a related article are plausible in context, and the target is a set on which the staleness head without evidence scores near AUROC 0.5. The second is training on the union of both sets and scoring on FRUIT. The third is feeding the predicted sentence labels to infilling, since all runs so far take the labels from the data.
+
+\bibliographystyle{plainnat}
+\bibliography{../../paper/paper,../../progress/progress}
+
+\clearpage
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\beginappendix{}
+
+\section{Tables}
+\label{app:tables}
+
+This appendix holds the numbers behind the sections above. All scores are on held-out articles.
+
+\subsection{Data}
+
+\begin{table}[H]
+\caption{Macro-F1 of a linear probe on surface features, on 10\% of each set held out from the probe. Sentence words are the words and word pairs of the sentence alone. Evidence-match flags describe string matches between the sentence and the evidence.}
+\label{tab:probe}
+\centering
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+Probe features & FRUIT sample & Synthetic \\
+\midrule
+Sentence words & 0.425 & 0.375 \\
+Evidence-match flags & 0.253 & 0.399 \\
+Both & 0.437 & 0.418 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sentence Classifier}
+
+\begin{table}[H]
+\caption{Sentence classifier on the held-out set with seed 42, and macro-F1 as mean $\pm$ standard deviation over five seeds. The synthetic held-out set has 3,116 sentences and the FRUIT one 38,267.}
+\label{tab:classifier_full}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccc}
+\toprule
+Train set & Model & Macro-F1 & \keep{} F1 & \edit{} F1 & \drop{} F1 & 5 seeds \\
+\midrule
+FRUIT & MiniLM baseline & 0.433 & 0.440 & 0.580 & 0.278 & $0.436 \pm 0.003$ \\
+ & LLaDA block 24, cross-entropy & \textbf{0.499} & 0.558 & 0.626 & 0.315 & $0.499 \pm 0.002$ \\
+ & LLaDA block 32, cross-entropy & 0.490 & 0.534 & 0.611 & 0.327 & $0.490 \pm 0.002$ \\
+ & LLaDA block 24, focal & 0.490 & 0.549 & 0.608 & 0.312 & $0.490 \pm 0.002$ \\
+\midrule
+Synthetic & MiniLM baseline & 0.443 & 0.563 & 0.564 & 0.201 & $0.443 \pm 0.018$ \\
+ & LLaDA block 24, cross-entropy & \textbf{0.870} & 0.946 & 0.921 & 0.742 & $0.849 \pm 0.015$ \\
+ & LLaDA block 32, cross-entropy & 0.708 & 0.871 & 0.833 & 0.419 & $0.691 \pm 0.010$ \\
+ & LLaDA block 24, focal & 0.853 & 0.950 & 0.934 & 0.674 & $0.839 \pm 0.012$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Held-out macro-F1 of the sentence classifier when one evidence vector joins the LLaDA sentence vector, seed 42.}
+\label{tab:evidence}
+\centering
+\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{FRUIT} & \multicolumn{2}{c}{Synthetic} \\
+Evidence input & Block 24 & Block 32 & Block 24 & Block 32 \\
+\midrule
+None & \textbf{0.499} & \textbf{0.490} & \textbf{0.870} & 0.708 \\
+Mean of the passages & 0.495 & 0.486 & 0.863 & \textbf{0.751} \\
+Nearest passage & 0.486 & 0.474 & 0.854 & 0.745 \\
+Attention over the passages & 0.488 & 0.481 & 0.864 & 0.742 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Confusion matrices of the block-24 classifier with cross-entropy on the held-out sets, seed 42. Rows are the labels of the data and columns the predictions after the deletion gate.}
+\label{tab:confusion}
+\centering
+\footnotesize
+\begin{tabular}{lrrrrrr}
+\toprule
+ & \multicolumn{3}{c}{FRUIT, predicted} & \multicolumn{3}{c}{Synthetic, predicted} \\
+Label & \keep{} & \edit{} & \drop{} & \keep{} & \edit{} & \drop{} \\
+\midrule
+\keep{} & 8,718 & 4,953 & 3,981 & 1,707 & 117 & 14 \\
+\edit{} & 3,492 & 10,061 & 2,547 & 57 & 1,135 & 2 \\
+\drop{} & 1,411 & 1,042 & 2,062 & 7 & 18 & 59 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Paired tests between sentence classifiers on the synthetic held-out set, seed 42 (2,000 resamples, smallest attainable $p$ 0.0005). The last two columns give the difference on each seed's own held-out split and the seed-42 difference on FRUIT.}
+\label{tab:classifier_tests}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccccc}
+\toprule
+Comparison (A $-$ B) & A $-$ B & 95\% interval & $p$ & $p_{\text{Holm}}$ & 5 seeds & FRUIT \\
+\midrule
+Block 24 $-$ MiniLM baseline & $+0.427$ & $[+0.389, +0.463]$ & $<0.001$ & \textbf{0.002} & $+0.406 \pm 0.019$ & $+0.066$ \\
+Block 24 $-$ block 32 & $+0.162$ & $[+0.124, +0.198]$ & $<0.001$ & \textbf{0.002} & $+0.158 \pm 0.010$ & $+0.009$ \\
+Block 24 cross-entropy $-$ focal & $+0.017$ & $[-0.005, +0.038]$ & 0.110 & 0.120 & $+0.010 \pm 0.006$ & $+0.010$ \\
+Block 32 cross-entropy $-$ focal & $+0.022$ & $[-0.004, +0.046]$ & 0.060 & 0.120 & $+0.003 \pm 0.012$ & $+0.012$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Token Staleness Head}
+
+\begin{table}[H]
+\caption{Token staleness head on the held-out tokens of \edit{} sentences, seed 42. \texttt{tau\_match} is the threshold whose masked share is closest to the stale share. The top-$k$ rule masks the $k$ highest-scoring tokens of each sentence and bounds every threshold rule from above. The last two rows are means $\pm$ standard deviations over five seeds.}
+\label{tab:staleness_full}
+\centering
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+ & FRUIT & Synthetic \\
+\midrule
+Held-out tokens & 531,706 & 34,049 \\
+Stale share & 28.5\% & 14.9\% \\
+AUROC & 0.645 & \textbf{0.993} \\
+PR-AUC & 0.405 & \textbf{0.972} \\
+\midrule
+Threshold tuned for F1 & 0.40 & 0.85 \\
+\quad precision / recall / share masked & 0.344 / 0.789 / 65.3\% & 0.935 / 0.898 / 14.3\% \\
+\texttt{tau\_match} & 0.60 & 0.80 \\
+\quad precision / recall / share masked & 0.415 / 0.377 / 25.8\% & 0.915 / 0.914 / 14.9\% \\
+\midrule
+Top-$k$ per sentence, $k$ the true stale count: precision & 0.573 & 0.964 \\
+Mean AUROC within a sentence & 0.667 & 0.995 \\
+\midrule
+AUROC, binary cross-entropy, 5 seeds & $0.645 \pm 0.001$ & $0.992 \pm 0.001$ \\
+AUROC, focal loss, 5 seeds & $0.626 \pm 0.003$ & $0.990 \pm 0.001$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Infilling}
+
+\begin{table}[H]
+\caption{Infilling on 50 held-out supported articles of each set (106 repaired sentences on FRUIT, 99 on the synthetic set). Exact match is the share of outputs equal to the gold rewrite and was computed for the synthetic set only.}
+\label{tab:infilling_full}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcccccc}
+\toprule
+Train set & System & ROUGE-L & Pool ROUGE-L & Hit & Coverage & Masked & Exact match \\
+\midrule
+FRUIT & Copy & 0.782 & & & & & \\
+ & Oracle masks & \textbf{0.801} & 0.878 & 33.3\% & 32.9\% & 24.4\% & \\
+ & Oracle masks, no evidence & 0.779 & 0.861 & 21.6\% & 18.9\% & 24.4\% & \\
+ & Predicted masks & 0.678 & 0.750 & 20.6\% & 15.4\% & 33.3\% & \\
+\midrule
+Synthetic & Copy & 0.867 & & & & & 0 of 99 \\
+ & Oracle masks & \textbf{0.940} & 0.976 & 80.0\% & 79.6\% & 14.4\% & 26 of 99 \\
+ & Oracle masks, no evidence & 0.905 & 0.953 & 49.5\% & 46.9\% & 14.4\% & 18 of 99 \\
+ & Predicted masks & 0.926 & 0.967 & 77.9\% & 77.7\% & 15.8\% & 21 of 99 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Entity measures of the unchanged sentence, the three infilling systems and the best candidate of the oracle-mask pool, as micro-averages over the repaired sentences of 50 articles. Lower is better for the last two columns.}
+\label{tab:entities}
+\centering
+\footnotesize
+\begin{tabular}{llccccc}
+\toprule
+Train set & System & Precision & Recall & New-entity recall & Outdated kept & Fabricated \\
+\midrule
+FRUIT & Copy & 0.727 & 0.740 & 0.000 & 1.000 & 0.000 \\
+ & Oracle masks & 0.753 & 0.777 & 0.218 & 0.236 & 0.144 \\
+ & Oracle masks, no evidence & 0.701 & 0.716 & 0.084 & 0.197 & 0.229 \\
+ & Predicted masks & 0.578 & 0.587 & 0.134 & 0.472 & 0.247 \\
+ & Pool, oracle masks & 0.930 & 0.810 & 0.328 & 0.055 & 0.085 \\
+\midrule
+Synthetic & Copy & 0.569 & 0.561 & 0.000 & 1.000 & 0.000 \\
+ & Oracle masks & 0.854 & 0.837 & 0.635 & 0.000 & 0.149 \\
+ & Oracle masks, no evidence & 0.743 & 0.704 & 0.346 & 0.006 & 0.242 \\
+ & Predicted masks & 0.811 & 0.807 & 0.610 & 0.013 & 0.175 \\
+ & Pool, oracle masks & 0.939 & 0.898 & 0.767 & 0.000 & 0.101 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Paired tests between infilling systems on the synthetic set (99 sentences in 50 articles). Intervals come from a paired bootstrap and $p$-values from a paired permutation test, both over articles. Bold marks $p_{\text{Holm}} < 0.05$. The last column gives the same difference on FRUIT from the progress report, with a star where it was significant there.}
+\label{tab:tests}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llccccc}
+\toprule
+Comparison (A $-$ B) & Measure & A $-$ B & 95\% interval & $p$ & $p_{\text{Holm}}$ & FRUIT \\
+\midrule
+Oracle $-$ copy & ROUGE-L & $+0.072$ & $[+0.056, +0.089]$ & 0.0001 & \textbf{0.003} & $+0.019$ \\
+ & Entity recall & $+0.276$ & $[+0.232, +0.331]$ & 0.0001 & \textbf{0.003} & $+0.037$ \\
+ & New-entity recall & $+0.635$ & $[+0.557, +0.719]$ & 0.0001 & \textbf{0.003} & $+0.218^{*}$ \\
+\midrule
+Oracle $-$ no evidence & ROUGE-L & $+0.035$ & $[+0.021, +0.048]$ & 0.0001 & \textbf{0.003} & $+0.022$ \\
+ & Entity recall & $+0.133$ & $[+0.091, +0.181]$ & 0.0001 & \textbf{0.003} & $+0.061^{*}$ \\
+ & New-entity recall & $+0.289$ & $[+0.204, +0.383]$ & 0.0001 & \textbf{0.003} & $+0.134$ \\
+ & Fabricated & $-0.093$ & $[-0.141, -0.042]$ & 0.0007 & \textbf{0.006} & $-0.085^{*}$ \\
+\midrule
+Predicted $-$ copy & ROUGE-L & $+0.058$ & $[+0.042, +0.075]$ & 0.0001 & \textbf{0.003} & $-0.105^{*}$ \\
+ & Entity precision & $+0.242$ & $[+0.188, +0.303]$ & 0.0001 & \textbf{0.003} & $-0.149^{*}$ \\
+ & Entity recall & $+0.246$ & $[+0.205, +0.294]$ & 0.0001 & \textbf{0.003} & $-0.153^{*}$ \\
+ & New-entity recall & $+0.610$ & $[+0.526, +0.701]$ & 0.0001 & \textbf{0.003} & $+0.134^{*}$ \\
+\midrule
+Oracle $-$ predicted & ROUGE-L & $+0.014$ & $[+0.005, +0.025]$ & 0.0043 & \textbf{0.030} & $+0.124^{*}$ \\
+ & Entity precision & $+0.042$ & $[+0.015, +0.072]$ & 0.0076 & \textbf{0.046} & $+0.174^{*}$ \\
+ & Entity recall & $+0.030$ & $[+0.000, +0.064]$ & 0.0888 & 0.444 & $+0.190^{*}$ \\
+ & New-entity recall & $+0.025$ & $[-0.028, +0.079]$ & 0.5348 & 1.000 & $+0.084$ \\
+ & Fabricated & $-0.026$ & $[-0.057, +0.001]$ & 0.0938 & 0.444 & $-0.104^{*}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Controls}
+
+\begin{table}[H]
+\caption{Synthetic heads trained on states extracted with and without the evidence, on the same held-out articles (seed 42). Without evidence the pass reads the article alone.}
+\label{tab:control_full}
+\centering
+\footnotesize
+\begin{tabular}{llcc}
+\toprule
+Head & Measure & With evidence & Without evidence \\
+\midrule
+Sentence classifier, block 24 & Macro-F1 & \textbf{0.870} & 0.564 \\
+ & \keep{} F1 & 0.946 & 0.780 \\
+ & \edit{} F1 & 0.921 & 0.838 \\
+ & \drop{} F1 & 0.742 & 0.075 \\
+Sentence classifier, block 32 & Macro-F1 & 0.708 & 0.532 \\
+\midrule
+Token staleness head & AUROC & \textbf{0.993} & 0.976 \\
+ & PR-AUC & 0.972 & 0.902 \\
+ & Precision at the tuned threshold & 0.935 & 0.800 \\
+ & Recall at the tuned threshold & 0.898 & 0.826 \\
+ & Top-$k$ precision, $k$ the true stale count & 0.964 & 0.894 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{Heads trained on one set (rows) scored on the held-out features of another (columns), seed 42, with the standardization and thresholds of the training set. The diagonal holds the held-out scores of training.}
+\label{tab:transfer}
+\centering
+\footnotesize
+\begin{tabular}{llccc}
+\toprule
+ & & \multicolumn{3}{c}{Held-out features of} \\
+Measure & Heads trained on & FRUIT & Synthetic & Synthetic, no evidence \\
+\midrule
+Classifier, block 24, macro-F1 & FRUIT & 0.499 & 0.340 & 0.369 \\
+ & Synthetic & 0.349 & 0.870 & 0.531 \\
+ & Synthetic, no evidence & 0.290 & 0.547 & 0.564 \\
+\midrule
+Classifier, block 32, macro-F1 & FRUIT & 0.490 & 0.267 & 0.311 \\
+ & Synthetic & 0.333 & 0.708 & 0.535 \\
+ & Synthetic, no evidence & 0.260 & 0.542 & 0.532 \\
+\midrule
+Staleness head, AUROC & FRUIT & 0.645 & 0.814 & 0.758 \\
+ & Synthetic & 0.526 & 0.993 & 0.969 \\
+ & Synthetic, no evidence & 0.521 & 0.991 & 0.976 \\
+\midrule
+Staleness head, mean AUROC within a sentence & FRUIT & 0.667 & 0.858 & 0.801 \\
+ & Synthetic & 0.535 & 0.995 & 0.972 \\
+ & Synthetic, no evidence & 0.533 & 0.994 & 0.980 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
