@@ -28,8 +28,8 @@ Usage:
         StalenessDeltaDetector,
         ConsequenceDetector,
     )
-    det = EditedAsEvidenceDetector()
-    flagged = det.flag(sentences, delta_r={0}, evidence=evidence)
+    det = MentionOverlapDetector()
+    flagged = det.flag(sentences, delta_r={0}, previous=sentences_before_round)
 """
 
 from __future__ import annotations
@@ -68,16 +68,24 @@ class MentionOverlapDetector:
         delta_r: set[int],
         pooled_before: np.ndarray | None = None,  # unused, kept for interface parity
         pooled_after: np.ndarray | None = None,
+        previous: list[str] | None = None,
         **kwargs,
     ) -> set[int]:
-        """Return indices of sentences outside delta_r that share a mention with delta_r."""
+        """Return indices of sentences outside delta_r that share a mention with delta_r.
+
+        `previous` holds the sentences before this round's repairs. The mentions
+        of a repaired sentence are those of both its versions, because a
+        dependent sentence shares the old mention ("three"), not the new one,
+        and a deleted sentence has no current text.
+        """
         if not delta_r:
             return set()
 
-        # Union of mentions from all repaired/deleted sentences
         repaired_mentions: set[str] = set()
         for j in delta_r:
             repaired_mentions |= self.M(sentences[j])
+            if previous is not None:
+                repaired_mentions |= self.M(previous[j])
 
         if not repaired_mentions:
             return set()
@@ -155,29 +163,21 @@ class EditedAsEvidenceDetector:
         sentences: list[str],
         delta_r: set[int],
         classifier_probs: np.ndarray | None = None,
-        tau_d: float = 0.45,
         **kwargs,
     ) -> set[int]:
-        """Return sentences outside delta_r that round r+1 classifier predicted as EDIT or DROP.
+        """Return sentences outside delta_r whose round r+1 arg-max class is not KEEP.
 
-        When round r+1 runs over (E^{(r+1)} ⊕ A^{(r)}), the classifier outputs
-        probabilities for each sentence. Any untouched sentence predicted as
-        EDIT (p_edit > p_keep) or DROP (p_drop >= tau_d) is flagged.
+        classifier_probs is [n_sents, 3], KEEP/EDIT/DROP, from the classifier
+        over (E^{(r+1)} ⊕ A^{(r)}). A DROP arg-max that fails the gate tau_d
+        becomes EDIT (Section 6.2), so both non-KEEP classes flag the sentence,
+        and the gate decides between deletion and re-masking afterwards.
         """
-        if not delta_r or classifier_probs is None:
+        if not delta_r:
             return set()
-
-        candidates = [k for k in range(len(sentences)) if k not in delta_r]
-        flagged: set[int] = set()
-
-        for k in candidates:
-            if k >= len(classifier_probs):
-                continue
-            p_keep, p_edit, p_drop = classifier_probs[k]
-            if p_drop >= tau_d or p_edit > p_keep:
-                flagged.add(k)
-
-        return flagged
+        if classifier_probs is None:
+            raise ValueError("EditedAsEvidenceDetector requires classifier_probs")
+        top = np.asarray(classifier_probs).argmax(-1)
+        return {k for k in range(len(sentences)) if k not in delta_r and top[k] != 0}
 
 # ---------------------------------------------------------------------------
 # (c) Staleness Delta Detector
@@ -190,8 +190,8 @@ class StalenessDeltaDetector:
     when one of its tokens (i) now scores ≥ τ_2, (ii) moved into the top 10th
     percentile of all article scores, and (iii) was not already there before.
 
-    Ranks are compared (not raw score differences) to avoid artifacts from
-    global sigmoid shifts between two encodings.
+    Membership of the top tenth is a rank condition, so a shift that moves
+    every score of one encoding together changes nothing.
 
     Requires the staleness head and per-token pooled hidden states. The hidden
     states passed here are sentence-level pooled vectors; token-level rescoring
@@ -238,23 +238,10 @@ class StalenessDeltaDetector:
         scores_before = self._score_sentences(pooled_before)
         scores_after = self._score_sentences(pooled_after)
 
-        # Rank of each sentence in its array (ascending: rank 0 = lowest score)
-        rank_before = scores_before.argsort().argsort()
-        rank_after = scores_after.argsort().argsort()
-
-        top_threshold = np.percentile(scores_after, self.top_percentile)
-        n = len(sentences)
-
-        flagged: set[int] = set()
-        for k in range(n):
-            if k in delta_r:
-                continue
-            in_top_after = scores_after[k] >= top_threshold
-            rose_in_rank = int(rank_after[k]) > int(rank_before[k])
-            above_tau2 = scores_after[k] >= self.tau2
-            if above_tau2 and in_top_after and rose_in_rank:
-                flagged.add(k)
-        return flagged
+        top_before = scores_before >= np.percentile(scores_before, self.top_percentile)
+        top_after = scores_after >= np.percentile(scores_after, self.top_percentile)
+        rising = top_after & ~top_before & (scores_after >= self.tau2)
+        return {k for k in np.flatnonzero(rising).tolist() if k not in delta_r}
 
 
 # ---------------------------------------------------------------------------
