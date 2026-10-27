@@ -15,11 +15,19 @@ Training:
   - Loss: binary cross-entropy
   - Optimizer: AdamW(lr=1e-3, wd=1e-2), batch 512, early stop on val AUROC
 
+u_j comes from --features-after, the features of the oracle-repaired view
+(cascading.views), so that the direct edit enters in its corrected version.
+Without --features-after it comes from --features, the outdated version. Pairs
+name sentences either by feature row ("j_row", "k_row", from cascading.mine)
+or by article and sentence index ("article_id", "j", "k", from cascading.links).
+
 Usage:
     python -m cascading.train \\
         --features features/train \\
         --pairs pairs/cascade_pairs.jsonl \\
         --out heads/cascade
+    python -m cascading.train --features features/cascades --features-after features/cascades-after \\
+        --pairs pairs/synthetic/pairs.jsonl --out heads/cascade
 """
 
 import argparse
@@ -115,19 +123,43 @@ def load_pairs(pairs_path: str | Path) -> tuple[list[dict], list[dict], list[int
     return pairs
 
 
+def first_rows(directory: str | Path) -> dict[str, int]:
+    """Feature row of the first sentence of every article in a classifier.extract directory."""
+    directory = Path(directory)
+    ids = json.loads((directory / "ids.json").read_text())
+    article = np.load(directory / "article.npy")
+    starts = np.flatnonzero(np.r_[True, article[1:] != article[:-1]])
+    return {ids[article[r]]: int(r) for r in starts}
+
+
+def resolve(pairs: list[dict], starts: dict[str, int]) -> list[dict]:
+    """Add j_row and k_row to pairs that name sentences by article and index."""
+    out = []
+    for p in pairs:
+        if "j_row" not in p:
+            if p["article_id"] not in starts:
+                continue
+            p = {**p, "j_row": starts[p["article_id"]] + p["j"], "k_row": starts[p["article_id"]] + p["k"]}
+        out.append(p)
+    return out
+
+
 def pairs_to_tensors(
     pairs: list[dict],
     features: np.ndarray,
+    features_after: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert pair list → (u_j, u_k, labels) float tensors.
 
-    Pairs reference sentence rows (j_row, k_row) into the features array.
+    Pairs reference sentence rows (j_row, k_row). u_j is read from
+    features_after when given, and u_k always from features.
     """
     j_rows = np.array([p["j_row"] for p in pairs], dtype=np.int64)
     k_rows = np.array([p["k_row"] for p in pairs], dtype=np.int64)
     ys     = np.array([p["label"] for p in pairs], dtype=np.float32)
 
-    u_j = torch.from_numpy(np.array(features[j_rows], dtype=np.float32))
+    source_j = features if features_after is None else features_after
+    u_j = torch.from_numpy(np.array(source_j[j_rows], dtype=np.float32))
     u_k = torch.from_numpy(np.array(features[k_rows], dtype=np.float32))
     y   = torch.from_numpy(ys)
     return u_j, u_k, y
@@ -154,13 +186,19 @@ def split_pairs_by_article(
 # ---------------------------------------------------------------------------
 
 def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
-    """Binary AUROC via the Mann-Whitney U statistic."""
-    pos = scores[labels == 1]
-    neg = scores[labels == 0]
-    if len(pos) == 0 or len(neg) == 0:
+    """Binary AUROC via the Mann-Whitney U statistic, with tied scores given their mean rank."""
+    n1 = int((labels == 1).sum())
+    n0 = len(labels) - n1
+    if n1 == 0 or n0 == 0:
         return float("nan")
-    u = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
-    return float(u) / (len(pos) * len(neg))
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    ranks = np.empty(len(scores), dtype=np.float64)
+    starts = np.flatnonzero(np.r_[True, sorted_scores[1:] != sorted_scores[:-1]])
+    ends = np.r_[starts[1:], len(scores)]
+    for a, b in zip(starts, ends):
+        ranks[order[a:b]] = (a + b + 1) / 2
+    return float((ranks[labels == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
 def train(
@@ -255,8 +293,10 @@ def main():
     )
     parser.add_argument("--features", required=True,
                         help="feature directory from classifier.extract")
+    parser.add_argument("--features-after",
+                        help="features of the oracle-repaired view, for u_j (cascading.views)")
     parser.add_argument("--pairs", required=True,
-                        help="JSONL of mined cascade pairs from cascading.mine")
+                        help="JSONL of cascade pairs from cascading.mine or cascading.links")
     parser.add_argument("--out", required=True,
                         help="output directory for head.pt and config.json")
     parser.add_argument("--layer", type=int, default=None,
@@ -279,20 +319,28 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Loading features from {args.features}...")
-    features, article_idx, _ = load_features(args.features, layer=args.layer)
+    layer = args.layer or max(json.loads((Path(args.features) / "config.json").read_text())["layers"])
+    features, article_idx, _ = load_features(args.features, layer=layer)
     d = features.shape[1]
     print(f"  {len(features)} sentences, d={d}")
 
+    features_after = None
+    if args.features_after:
+        if json.loads((Path(args.features_after) / "ids.json").read_text()) != \
+                json.loads((Path(args.features) / "ids.json").read_text()):
+            raise SystemExit("--features and --features-after hold different articles")
+        features_after, _, _ = load_features(args.features_after, layer=layer)
+
     print(f"Loading pairs from {args.pairs}...")
-    all_pairs = load_pairs(args.pairs)
+    all_pairs = resolve(load_pairs(args.pairs), first_rows(args.features))
     n_pos = sum(p["label"] for p in all_pairs)
     print(f"  {len(all_pairs)} pairs  ({n_pos} positive, {len(all_pairs)-n_pos} negative)")
 
     train_pairs, val_pairs = split_pairs_by_article(all_pairs, args.holdout, args.seed)
     print(f"  train: {len(train_pairs)}  val: {len(val_pairs)}")
 
-    train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features)
-    val_uj,   val_uk,   val_y   = pairs_to_tensors(val_pairs, features)
+    train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features, features_after)
+    val_uj,   val_uk,   val_y   = pairs_to_tensors(val_pairs, features, features_after)
 
     head = ConsequenceHead(d=d, hidden=args.hidden)
     print(f"\nTraining ConsequenceHead  d={d}  hidden={args.hidden}  device={device}")
@@ -308,8 +356,9 @@ def main():
         "d": d,
         "hidden": args.hidden,
         "features": str(Path(args.features).resolve()),
+        "features_after": str(Path(args.features_after).resolve()) if args.features_after else None,
         "pairs": str(Path(args.pairs).resolve()),
-        "layer": args.layer,
+        "layer": layer,
         "seed": args.seed,
         **metrics,
     }
