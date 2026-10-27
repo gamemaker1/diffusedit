@@ -33,6 +33,7 @@ from rouge_score import rouge_scorer
 
 from classifier.inputs import read_jsonl
 from infilling.entities import Extractor, counts
+from infilling.evaluate import gold
 
 METRICS = ("rougeL", "precision", "recall", "new_recall", "stale_kept", "unsupported")
 LOWER_IS_BETTER = {"stale_kept", "unsupported"}
@@ -89,8 +90,7 @@ def collect(data, run_dirs):
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
         repaired = sorted({edit["sentence"] for r in runs.values() for edit in r[article_id]["edits"]})
         for j in repaired:
-            entry = record["labels"][j]
-            target = record["target_sentences"][entry["target_idx"]]["text"]
+            target = gold(record, j, "target")
             source = record["source_sentences"][j].strip()
             g, s = m(target), m(source)
             new_words = words(target) - words(source)

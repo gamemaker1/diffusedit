@@ -9,3 +9,5 @@
 *.pdf
 
 !progress/figures/*.pdf
+
+!experiments/synthetic/figures/*.pdf

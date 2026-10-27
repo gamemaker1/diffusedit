@@ -106,6 +106,8 @@ def main():
     parser.add_argument("--token-layer", type=int, help="1-based block for token states; default final")
     parser.add_argument("--tokens", action=argparse.BooleanOptionalAction, default=True,
                         help="store EDIT-sentence token states")
+    parser.add_argument("--evidence", action=argparse.BooleanOptionalAction, default=True,
+                        help="put the evidence before the article; --no-evidence is the control that reads the article alone")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is not available")
@@ -117,7 +119,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    examples = [build(r, tok) for r in select(args.data, args.sample, args.seed)]
+    examples = [build(r, tok, args.evidence) for r in select(args.data, args.sample, args.seed)]
     offsets = np.cumsum([0] + [len(e.spans) for e in examples])
     rows = int(offsets[-1])
     evidence_offsets = np.cumsum([0] + [len(e.evidence_spans) for e in examples])
@@ -150,6 +152,8 @@ def main():
         "token_layer": token_layer,
         "tokens": n_tokens,
     }
+    if not args.evidence:
+        config["evidence"] = False
     progress_path = out / "progress.json"
     config_path = out / "config.json"
     if progress_path.exists():
@@ -177,10 +181,11 @@ def main():
         layer: np.lib.format.open_memmap(out / f"layer{layer}.npy", mode=mode, dtype=np.float16, shape=(rows, d))
         for layer in layers
     }
+    # an empty array cannot be memory-mapped, so a run without evidence stores no evidence vectors
     evidence_memmaps = {
         layer: np.lib.format.open_memmap(out / f"evidence_layer{layer}.npy", mode=mode, dtype=np.float16, shape=(evidence_rows, d))
         for layer in layers
-    }
+    } if evidence_rows else {}
     token_mm = None
     if token_layer:
         token_mm = np.lib.format.open_memmap(out / "tokens" / f"layer{token_layer}.npy", mode=mode,

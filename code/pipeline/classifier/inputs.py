@@ -77,12 +77,15 @@ def stale_marks(offsets, stale_spans, shift):
     return marks
 
 
-def build(record, tok):
+def build(record, tok, evidence=True):
+    """The input of one article. Without evidence the sequence is [BOS] + article."""
     ids = [] if tok.bos_token_id is None else [tok.bos_token_id]
-    ev_ids, ev_spans = evidence_ids(tok, record["evidence"])
-    shifted_ev_spans = [(s + len(ids), e + len(ids)) for s, e in ev_spans]
-    ids += ev_ids
-    ids += encode(tok, SEPARATOR)
+    shifted_ev_spans = []
+    if evidence:
+        ev_ids, ev_spans = evidence_ids(tok, record["evidence"])
+        shifted_ev_spans = [(s + len(ids), e + len(ids)) for s, e in ev_spans]
+        ids += ev_ids
+        ids += encode(tok, SEPARATOR)
 
     if len(record["labels"]) != len(record["source_sentences"]):
         raise ValueError(f"{record['id']}: {len(record['labels'])} labels for "
