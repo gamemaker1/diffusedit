@@ -2,18 +2,19 @@
 
 Records made from the same seed paragraph share their first sentence, taken
 from the gold text, or from the source when the sentence is a DROP, which the
-generator does not alter. 20 of the 9183 records repeat the seed of an earlier
-record. All records of one seed go to the same split, so no test article has
-a near copy in train. Val and test are held out for evaluation, and no job
-runs on them during development.
+generator does not alter. All records of one seed go to the same split, so no
+test article has a near copy in train. A seed's split follows from a hash of
+its first sentence and --seed, so adding records to the set does not move any
+existing record to another split. Val and test are held out for evaluation,
+and no job runs on them during development.
 
 Usage:
     python split.py train.jsonl split
 """
 
 import argparse
+import hashlib
 import json
-import random
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -38,10 +39,10 @@ def main():
         if line.strip():
             record = json.loads(line)
             groups[seed_key(record)].append(record)
-    keys = sorted(groups)
-    random.Random(args.seed).shuffle(keys)
-    n_test, n_val = round(len(keys) * args.test), round(len(keys) * args.val)
-    splits = {"test": keys[:n_test], "val": keys[n_test:n_test + n_val], "train": keys[n_test + n_val:]}
+    splits = {"test": [], "val": [], "train": []}
+    for key in sorted(groups):
+        u = int.from_bytes(hashlib.sha256(f"{args.seed}:{key}".encode()).digest()[:8], "big") / 2 ** 64
+        splits["test" if u < args.test else "val" if u < args.test + args.val else "train"].append(key)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

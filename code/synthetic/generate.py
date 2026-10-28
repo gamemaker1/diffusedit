@@ -7,8 +7,8 @@ Features:
 - Entity swaps drawn from the seed corpus itself, of the same type and shape,
   often from the same article, and number and date changes of varied size.
 - One to three changed spans per EDIT sentence, and per-article edit rates.
-- Cascading edit pairs (s_j -> s_k) through a shared entity, a surname alias
-  or a country and its demonym, with evidence for s_j only.
+- Cascading edits (s_j -> s_k) of the kinds in synthetic/mutators/cascades.py,
+  with evidence for s_j only. Each link records its kind.
 - Evidence in varied forms (synthetic/evidence.py): restatements, excerpts,
   fact-sheet fields, retractions, confirmations of KEEP sentences in the same
   frames, and snippets from other articles.
@@ -129,17 +129,21 @@ class SyntheticGenerator:
         edit_prob: float = 0.35,
         drop_prob: float = 0.10,
         cascade_prob: float = 0.20,
+        cascade_kinds=None,
+        require_cascade: bool = False,
     ):
         self.rng = random.Random(seed)
         self.seeds = [[s.strip() for s in article] for article in (seeds or DEFAULT_SEEDS)]
         self.edit_prob = edit_prob
         self.drop_prob = drop_prob
         self.cascade_prob = cascade_prob
+        # With require_cascade every article is edited and tries a cascade.
+        self.require_cascade = require_cascade
 
         self.bank = EntityBank(self.seeds)
         self.entity_mutator = EntityMutator(seed=seed, bank=self.bank)
         self.number_mutator = NumberMutator(seed=seed + 1)
-        self.cascade_mutator = CascadeMutator(seed=seed + 2, bank=self.bank)
+        self.cascade_mutator = CascadeMutator(seed=seed + 2, bank=self.bank, **({"strategies": cascade_kinds} if cascade_kinds else {}))
         self.writer = Writer(random.Random(seed + 3))
 
     def _edit(self, sentence, article):
@@ -180,7 +184,7 @@ class SyntheticGenerator:
                 for _, _, text, label in self.bank.entities(s):
                     article.setdefault(label, set()).add(text)
 
-        if self.rng.random() < self.P_UNCHANGED:
+        if self.rng.random() < self.P_UNCHANGED and not self.require_cascade:
             edit_prob = drop_prob = 0.0
         else:
             edit_prob = min(0.9, self.edit_prob * self.rng.uniform(0.3, 1.7))
@@ -193,7 +197,7 @@ class SyntheticGenerator:
             return {"title": self.writer.title(self._main_entity(about), year), "text": text, "kind": kind, "about": about}
 
         cascade_pair = None
-        if edit_prob and self.rng.random() < self.cascade_prob and len(base) >= 2:
+        if edit_prob and (self.require_cascade or self.rng.random() < self.cascade_prob) and len(base) >= 2:
             cascade_pair = self.cascade_mutator.find_and_inject_cascade(base, article)
 
         source_sentences, labels = [], []
@@ -204,9 +208,10 @@ class SyntheticGenerator:
                 focus = [(m.start(), m.end()) for m in re.finditer(re.escape(cascade_pair.shared_concept.split(" / ")[0]), sentence)]
                 required.append(snippet(self.writer.support(sentence, focus[:1] or None), "support"))
                 continue
-            if cascade_pair and i == cascade_pair.cascade_sentence_idx:
-                source_sentences.append(cascade_pair.cascade_mutated)
-                labels.append(SentenceLabel("EDIT", cascade_pair.cascade_stale_spans, sentence))
+            if cascade_pair and i in cascade_pair.cascade_edits:
+                mutated, spans = cascade_pair.cascade_edits[i]
+                source_sentences.append(mutated)
+                labels.append(SentenceLabel("EDIT", spans, sentence))
                 continue
 
             r = self.rng.random()
@@ -266,8 +271,8 @@ class SyntheticGenerator:
 
         cascades = []
         if cascade_pair:
-            cascades.append({"direct": cascade_pair.direct_sentence_idx,
-                             "cascade": cascade_pair.cascade_sentence_idx})
+            cascades = [{"direct": cascade_pair.direct_sentence_idx, "cascade": k, "kind": cascade_pair.strategy}
+                        for k in cascade_pair.cascade_edits]
         return SyntheticRecord(
             id=record_id,
             evidence=evidence,
@@ -405,6 +410,8 @@ def main():
     parser.add_argument("--edit-prob", type=float, default=0.35, help="mean probability of EDIT per sentence")
     parser.add_argument("--drop-prob", type=float, default=0.10, help="mean probability of DROP per sentence")
     parser.add_argument("--cascade-prob", type=float, default=0.25, help="probability of cascade injection")
+    parser.add_argument("--cascade-kinds", help="comma-separated cascade kinds to try (default: all)")
+    parser.add_argument("--require-cascade", action="store_true", help="edit every article and always try a cascade")
     args = parser.parse_args()
 
     if args.seed_file:
@@ -424,6 +431,8 @@ def main():
         edit_prob=args.edit_prob,
         drop_prob=args.drop_prob,
         cascade_prob=args.cascade_prob,
+        cascade_kinds=args.cascade_kinds.split(",") if args.cascade_kinds else None,
+        require_cascade=args.require_cascade,
     )
     print(f"Generating {args.n} synthetic records with seed {args.seed}...")
     records = generator.generate_dataset(args.n, prefix=args.prefix)

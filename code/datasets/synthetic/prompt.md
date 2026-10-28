@@ -61,8 +61,12 @@ sentence.
 CASCADE. The sentence is wrong only as a consequence of an EDIT sentence of
 the same article. Write no passage about it and never list it in `about`. No
 passage may contain one of its `wrong` strings or one of its `avoid` strings.
-Do not state its fact in other words either. A reader must be able to fix it
-only by reasoning from the corrected EDIT sentence.
+The check ignores case and matches whole words anywhere in a title or text,
+dates included. An `avoid` string "She" or "her" therefore rules out those
+pronouns in every passage, so refer to the person by name or by role. An
+`avoid` string "25" rules out "25 May" and "25 goals". Do not state its fact
+in other words either. A reader must be able to fix it only by reasoning
+from the corrected EDIT sentence.
 
 Background. In about one article in three, add one passage on the same topic
 that bears on no sentence (`about: []`).
