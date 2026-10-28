@@ -1,6 +1,6 @@
 """Entity metrics for an infilling run (Section 9.2).
 
-M(text) is the mention extractor of datasets/collate.py: spaCy en_core_web_sm
+M(text) is the mention extractor of cascading.mentions: spaCy en_core_web_sm
 entities of the types in MENTION_LABELS, lowercased and stripped, plus every
 digit string. It runs on each sentence alone, so gold, source and output
 mentions come from the same procedure.
@@ -31,32 +31,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from cascading.mentions import Extractor
 from classifier.inputs import read_jsonl
 from infilling.evaluate import gold
-
-MENTION_LABELS = {
-    "CARDINAL", "DATE", "FAC", "GPE", "LOC", "MONEY", "NORP", "ORDINAL",
-    "ORG", "PERCENT", "PERSON", "QUANTITY", "TIME",
-}
-MENTION_STRIP = " .,;:'\"()!?\t\n"
-NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
-
-
-class Extractor:
-    def __init__(self):
-        import spacy
-        self.nlp = spacy.load("en_core_web_sm")
-        self.cache = {}
-
-    def __call__(self, text):
-        if text not in self.cache:
-            doc = self.nlp(text)
-            out = {re.sub(r"\s+", " ", e.text.lower()).strip(MENTION_STRIP)
-                   for e in doc.ents if e.label_ in MENTION_LABELS}
-            out |= set(NUMBER_RE.findall(text))
-            out.discard("")
-            self.cache[text] = out
-        return self.cache[text]
 
 
 def words(text):
@@ -101,12 +78,16 @@ def main():
         evidence_text = [f"{s['title']}: {s['text']}" for s in record["evidence"]]
         e = set().union(*(m(t) for t in evidence_text)) if evidence_text else set()
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
+        # infilling.loop can repair a sentence in several rounds. It counts once,
+        # with the candidates of all its rounds.
+        decisions = {}
         for edit in result["edits"]:
-            j = edit["sentence"]
+            decisions.setdefault(edit["sentence"], []).extend(edit["decisions"])
+        for j, sentence_decisions in decisions.items():
             target = gold(record, j)
             source, output = result["source"][j], result["output"][j]
             g, s, o = m(target), m(source), m(output)
-            texts = [c["text"] for d in edit["decisions"] for c in d["candidates"]]
+            texts = [c["text"] for d in sentence_decisions for c in d["candidates"]]
             best = max(texts, key=lambda t: (len(m(t) & (g - s)), -len(m(t) - g)))
             new_words = words(target) - words(source)
             supported = bool(new_words) and new_words <= evidence_words | words(source)

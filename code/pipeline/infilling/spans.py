@@ -180,7 +180,7 @@ def policy_spans(scores, counts, tau, c_max, stats):
         mask[keep] = True
         stats["cap"] += 1
     for i in range(1, n - 1):
-        if not mask[i] and mask[i - 1] and mask[i + 1] and allowed[i]:
+        if not mask[i] and mask[i - 1] and mask[i + 1] and allowed[i] and mask.sum() < limit:
             mask[i] = True
             stats["absorbed"] += 1
     return runs(mask)

@@ -87,7 +87,14 @@ def main():
     for result in results:
         record = records[result["id"]]
         stats.update(result["stats"])
+        # infilling.loop can repair a sentence in several rounds. Each repaired
+        # sentence counts once, with the candidates and masks of all its rounds.
+        merged = {}
         for edit in result["edits"]:
+            entry = merged.setdefault(edit["sentence"], {"sentence": edit["sentence"], "decisions": [], "masked": []})
+            entry["decisions"] += edit["decisions"]
+            entry["masked"] += edit.get("masked", [])
+        for edit in merged.values():
             j = edit["sentence"]
             target = gold(record, j)
             source, output = result["source"][j], result["output"][j]
