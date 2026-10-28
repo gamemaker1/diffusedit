@@ -6,18 +6,23 @@ the train labels. Features are standardized with train statistics first. That
 is an affine map the linear layer could absorb, so the model class is the one
 in Eq. 5.
 
-A seeded 10% of the train articles is held out, split by article so that no
-article has sentences on both sides. The held-out part drives early stopping
-and tunes the DROP gate tau_d (Section 6.2). A sentence whose argmax is DROP is
-deleted only if p_DROP >= tau_d. Otherwise it becomes EDIT.
+With --val, the head fits on every train sentence and the val features drive
+early stopping and tune the DROP gate tau_d (Section 6.2). --test is then
+scored once with that tau_d. Without --val, a seeded 10% of the train articles
+is held out instead, split by article so that no article has sentences on
+both sides. A sentence whose argmax is DROP is deleted only if
+p_DROP >= tau_d. Otherwise it becomes EDIT.
 
 --loss focal replaces the weighted cross-entropy with the weighted focal
 loss -w_y (1 - p_y)^gamma log p_y. --seeds trains once per seed, each with its
-own held-out split, initialization and batch order, and loads the features
-once.
+own initialization and batch order (and its own held-out split without
+--val), and loads the features once. --save-predictions writes the
+probabilities of the test sentences, or of the held-out ones without --test,
+for paired tests.
 
 Usage:
-    python -m classifier.train --train features/train --layer 32 --out heads/layer32
+    python -m classifier.train --train features/train --val features/val --test features/test \
+        --layer 32 --out heads/layer32
     python -m classifier.train --train features/train --layer 24 --loss focal \
         --seeds 42 1 2 3 4 --save-predictions --out heads/focal/layer24
 """
@@ -115,11 +120,15 @@ def focal_loss(logits, y, weights, gamma):
     return -(weights[y] * (1 - logp.exp()) ** gamma * logp).sum()
 
 
-def train_one(args, x_all, y_all, article, n_articles, seed, out, device):
+def train_one(args, x_all, y_all, article, n_articles, seed, out, device, val=None, test=None):
     torch.manual_seed(seed)
-    fit, held = split_by_article(article, n_articles, args.holdout, seed)
-    x_train, y_train = x_all[fit], y_all[fit]
-    x_held, y_held = x_all[held], y_all[held]
+    if val is None:
+        fit, held = split_by_article(article, n_articles, args.holdout, seed)
+        x_train, y_train = x_all[fit], y_all[fit]
+        x_held, y_held = x_all[held], y_all[held]
+    else:
+        x_train, y_train = x_all, y_all
+        x_held, y_held, _ = val
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
     print(f"seed {seed}: train {len(y_train)} sentences, held out {len(y_held)}, loss {args.loss}"
@@ -165,9 +174,15 @@ def train_one(args, x_all, y_all, article, n_articles, seed, out, device):
     tau = max(sweep, key=sweep.get)
     print(f"seed {seed}: tau_d {tau}  held-out macro-F1 {sweep[tau]:.4f}")
 
-    metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep, "holdout": args.holdout,
+    metrics = {"layer": args.layer, "tau_d": tau, "tau_sweep": sweep, "holdout": None if val else args.holdout,
                "seed": seed, "loss": args.loss, "gamma": args.gamma if args.loss == "focal" else None,
-               "heldout": scores(y_held, decide(held_probs, tau))}
+               "val" if val else "heldout": scores(y_held, decide(held_probs, tau))}
+    if test is not None:
+        x_test, y_test, test_article = test
+        test_probs = predict(head, x_test, mean, std, device)
+        metrics["test"] = scores(y_test, decide(test_probs, tau))
+        per_class = "  ".join(f"{name} {metrics['test'][name]['f1']:.3f}" for name in LABELS)
+        print(f"seed {seed}: test macro-F1 {metrics['test']['macro_f1']:.4f}  {per_class}")
     for directory in args.eval:
         x, y, _, _ = load(directory, args.layer)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
@@ -179,7 +194,11 @@ def train_one(args, x_all, y_all, article, n_articles, seed, out, device):
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "layer": args.layer, "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    if args.save_predictions:
+    if args.save_predictions and test is not None:
+        np.savez_compressed(out / "test_predictions.npz", rows=np.arange(len(y_test)), article=test_article,
+                            probs=test_probs.numpy().astype(np.float32), labels=y_test.numpy().astype(np.int8),
+                            tau_d=tau)
+    elif args.save_predictions and val is None:
         np.savez_compressed(out / "heldout_predictions.npz", rows=held.nonzero()[:, 0].numpy(),
                             article=article[held.numpy()], probs=held_probs.numpy().astype(np.float32),
                             labels=y_held.numpy().astype(np.int8), tau_d=tau)
@@ -188,7 +207,9 @@ def train_one(args, x_all, y_all, article, n_articles, seed, out, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
-    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out")
+    parser.add_argument("--val", help="feature dir for early stopping and tau_d; if omitted a holdout is carved from train")
+    parser.add_argument("--test", help="feature dir scored once with the tuned tau_d")
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out without --val")
     parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to report on")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--out", required=True)
@@ -208,11 +229,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     x_all, y_all, article, n_articles = load(args.train, args.layer)
-    if args.seeds:
-        for seed in args.seeds:
-            train_one(args, x_all, y_all, article, n_articles, seed, Path(args.out) / f"seed{seed}", device)
-    else:
-        train_one(args, x_all, y_all, article, n_articles, args.seed, Path(args.out), device)
+    val = load(args.val, args.layer)[:3] if args.val else None
+    test = load(args.test, args.layer)[:3] if args.test else None
+    for seed in args.seeds or [args.seed]:
+        out = Path(args.out) / f"seed{seed}" if args.seeds else Path(args.out)
+        train_one(args, x_all, y_all, article, n_articles, seed, out, device, val, test)
 
 
 if __name__ == "__main__":

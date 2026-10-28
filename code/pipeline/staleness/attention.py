@@ -17,14 +17,18 @@ the evidence does not mention it. The four-block comparison is the one of the
 consequence head (Eq. 8). Hidden states are standardized with the moments of
 the fit tokens and of the fit evidence tokens.
 
-Training uses weighted binary cross-entropy, early stopping on held-out
-PR-AUC, and the article holdout of classifier.train.split_by_article, so with
-the same seed and fraction it holds out the same articles as staleness.train.
+Training uses weighted binary cross-entropy and early stopping on PR-AUC.
+With --val the head fits on every train article, and val drives early
+stopping, tau and tau_match. --test is then scored once, controls included.
+Without --val, the article holdout of classifier.train.split_by_article is
+used, so with the same seed and fraction it holds out the same articles as
+staleness.train.
 Batches are whole articles, so each token attends only to its own evidence.
 
-Two controls score the held-out tokens with altered evidence:
+Two controls score the test tokens (or the held-out tokens without --test)
+with altered evidence:
 
-    shuffled   each article reads the evidence of another held-out article
+    shuffled   each article reads the evidence of another article of that set
     none       every article reads no evidence, only the null slot
 
 A head that reads the evidence loses AUROC under both. A head that ignores it
@@ -35,13 +39,14 @@ default with evidence in the input).
 
 Output directory:
     head.pt           state dict, configuration, moments, layer, tau, tau_match
-    metrics.json      held-out PR-AUC, AUROC, F1 at tau, and the two controls
+    metrics.json      val PR-AUC, AUROC and F1 at tau, the same on test, and the two controls
     sweep.json        precision, recall and masked share per tau, and tau_match,
                       the tau whose masked share is closest to the stale share
-    heldout_ids.json  held-out article ids, for infilling.run --ids
+    heldout_ids.json  held-out article ids without --val, for infilling.run --ids
 
 Usage:
-    python -m staleness.attention --train features/train --out heads/staleness_attention
+    python -m staleness.attention --train features/train --val features/val --test features/test \
+        --out heads/staleness_attention
 """
 
 import argparse
@@ -209,7 +214,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out")
+    parser.add_argument("--val", help="feature dir for early stopping and the thresholds")
+    parser.add_argument("--test", help="feature dir scored once, with the controls")
+    parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out without --val")
     parser.add_argument("--dim", type=int, default=256, help="attention width r")
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--hidden", type=int, default=256, help="width of the MLP hidden layer")
@@ -226,16 +233,23 @@ def main():
     torch.manual_seed(args.seed)
     layer = token_layer_of(args.train)
     data = Articles(args.train, layer)
-    fit_mask, held_mask = split_by_article(data.article, data.n_articles, args.holdout, args.seed)
-    fit = sorted({int(a) for a in data.article[fit_mask.numpy()]})
-    held = sorted({int(a) for a in data.article[held_mask.numpy()]})
-    fit_rows = fit_mask.nonzero()[:, 0]
+    if args.val:
+        fit = sorted(data.tokens)
+        fit_rows = torch.arange(len(data.y))
+        val_data = Articles(args.val, layer)
+        held = sorted(val_data.tokens)
+    else:
+        fit_mask, held_mask = split_by_article(data.article, data.n_articles, args.holdout, args.seed)
+        fit = sorted({int(a) for a in data.article[fit_mask.numpy()]})
+        held = sorted({int(a) for a in data.article[held_mask.numpy()]})
+        fit_rows = fit_mask.nonzero()[:, 0]
+        val_data = data
     mean, std = moments(Rows(data.x, fit_rows))
     ev_mean, ev_std = evidence_moments(data, fit)
     norm = [t.to(device) for t in (mean, std, ev_mean, ev_std)]
     pw = pos_weight(data.y[fit_rows]).to(device)
     d = data.x.shape[1]
-    print(f"token_layer {layer}, {len(fit)} fit articles ({len(fit_rows)} tokens), {len(held)} held out, "
+    print(f"token_layer {layer}, {len(fit)} fit articles ({len(fit_rows)} tokens), {len(held)} val articles, "
           f"{len(data.evidence)} evidence tokens, pos_weight {pw.item():.2f}", flush=True)
 
     config = {"d": d, "dim": args.dim, "heads": args.heads, "hidden": args.hidden, "dropout": args.dropout}
@@ -255,7 +269,7 @@ def main():
             optimizer.step()
             total += loss.item() * len(labels)
             n += len(labels)
-        probs, y = predict(head, data, held, norm, device, args.batch_tokens)
+        probs, y = predict(head, val_data, held, norm, device, args.batch_tokens)
         score = pr_auc(y, probs)
         print(f"epoch {epoch}  loss {total / n:.4f}  val PR-AUC {score:.4f}  {time.time() - t0:.0f}s", flush=True)
         if score > best:
@@ -267,30 +281,44 @@ def main():
                 break
     head.load_state_dict(best_state)
 
-    probs, y = predict(head, data, held, norm, device, args.batch_tokens)
+    probs, y = predict(head, val_data, held, norm, device, args.batch_tokens)
     grid, tau_match, stale_share = sweep(y, probs)
     tau = max(grid, key=lambda t: grid[t]["f1"])
-    shuffled = dict(zip(held, np.roll(np.random.default_rng(args.seed).permutation(held), 1).tolist()))
-    p_shuffled, _ = predict(head, data, held, norm, device, args.batch_tokens, evidence_from=shuffled)
-    p_none, _ = predict(head, data, held, norm, device, args.batch_tokens, no_evidence=True)
     metrics = {
         "layer": layer, "tau": tau, "tau_match": tau_match, "val_pr_auc": pr_auc(y, probs),
         "val_auroc": auroc(y, probs), "val": scores(y, (probs >= tau).float()),
-        "controls": {
-            "shuffled_evidence": {"pr_auc": pr_auc(y, p_shuffled), "auroc": auroc(y, p_shuffled)},
-            "no_evidence": {"pr_auc": pr_auc(y, p_none), "auroc": auroc(y, p_none)},
-        },
-        "holdout": args.holdout, "seed": args.seed, "config": config, "epochs_run": epoch,
+        "holdout": None if args.val else args.holdout, "seed": args.seed, "config": config, "epochs_run": epoch,
     }
-    print(f"tau {tau}  F1 {metrics['val']['f1']:.4f}  PR-AUC {metrics['val_pr_auc']:.4f}  "
-          f"AUROC {metrics['val_auroc']:.4f}  tau_match {tau_match}")
+    # The controls score the test set when there is one, else the val articles.
+    scored, scored_ids = (Articles(args.test, layer), None) if args.test else (val_data, held)
+    scored_ids = scored_ids or sorted(scored.tokens)
+    p, ys = predict(head, scored, scored_ids, norm, device, args.batch_tokens)
+    if args.test:
+        metrics["test"] = {**scores(ys, (p >= tau).float()), "pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p),
+                           "masked": (p >= tau_match).float().mean().item()}
+    shuffled = dict(zip(scored_ids, np.roll(np.random.default_rng(args.seed).permutation(scored_ids), 1).tolist()))
+    p_shuffled, _ = predict(head, scored, scored_ids, norm, device, args.batch_tokens, evidence_from=shuffled)
+    p_none, _ = predict(head, scored, scored_ids, norm, device, args.batch_tokens, no_evidence=True)
+    metrics["controls"] = {
+        "set": "test" if args.test else "val",
+        "reference": {"pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p)},
+        "shuffled_evidence": {"pr_auc": pr_auc(ys, p_shuffled), "auroc": auroc(ys, p_shuffled)},
+        "no_evidence": {"pr_auc": pr_auc(ys, p_none), "auroc": auroc(ys, p_none)},
+    }
+    print(f"tau {tau}  val F1 {metrics['val']['f1']:.4f}  val PR-AUC {metrics['val_pr_auc']:.4f}  "
+          f"val AUROC {metrics['val_auroc']:.4f}  tau_match {tau_match}")
+    if args.test:
+        print(f"test PR-AUC {metrics['test']['pr_auc']:.4f}  AUROC {metrics['test']['auroc']:.4f}  "
+              f"F1 {metrics['test']['f1']:.4f}")
     for name, c in metrics["controls"].items():
-        print(f"control {name}: PR-AUC {c['pr_auc']:.4f}  AUROC {c['auroc']:.4f}")
+        if name != "set":
+            print(f"control {name}: PR-AUC {c['pr_auc']:.4f}  AUROC {c['auroc']:.4f}")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    ids = json.loads((Path(args.train) / "ids.json").read_text())
-    (out / "heldout_ids.json").write_text(json.dumps([ids[a] for a in held]))
+    if not args.val:
+        ids = json.loads((Path(args.train) / "ids.json").read_text())
+        (out / "heldout_ids.json").write_text(json.dumps([ids[a] for a in held]))
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     (out / "sweep.json").write_text(json.dumps({"tau_match": tau_match, "stale_share": stale_share,
                                                 "grid": grid}, indent=2))

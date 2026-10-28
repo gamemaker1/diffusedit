@@ -19,6 +19,12 @@ Training:
   - tau_c is the threshold with the best F1 on the validation pairs, saved
     in config.json, the default of the consequence detector
 
+With --val-pairs, the head fits on every --pairs pair, and the val pairs,
+read from --val-features and --val-features-after, drive early stopping and
+tau_c. --test-pairs are then scored once (AUROC, and precision, recall and F1
+at tau_c). Without --val-pairs a seeded share of the pair articles is held
+out instead.
+
 u_j comes from --features-after, the features of the oracle-repaired view
 (cascading.views), so that the direct edit enters in its corrected version.
 Without --features-after it comes from --features, the outdated version. Pairs
@@ -27,6 +33,10 @@ name sentences by article and sentence index ("article_id", "j", "k").
 Usage:
     python -m cascading.train --features features/cascade/source --features-after features/cascade/after \\
         --pairs ../datasets/synthetic/cascade/pairs.jsonl --out heads/consequence
+    python -m cascading.train --features f/train --features-after f/train_after --pairs split/pairs.jsonl \\
+        --val-features f/val --val-features-after f/val_after --val-pairs split/val_pairs.jsonl \\
+        --test-features f/test --test-features-after f/test_after --test-pairs split/test_pairs.jsonl \\
+        --out heads/consequence
 """
 
 import argparse
@@ -326,6 +336,10 @@ def main():
     parser.add_argument("--holdout", type=float, default=0.1,
                         help="article-level holdout fraction for early stopping")
     parser.add_argument("--seed", type=int, default=42)
+    for split in ("val", "test"):
+        parser.add_argument(f"--{split}-features", help=f"features of the {split} split")
+        parser.add_argument(f"--{split}-features-after", help=f"features of the {split} split's oracle-repaired view")
+        parser.add_argument(f"--{split}-pairs", help=f"pairs of the {split} split from cascading.links")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -351,11 +365,23 @@ def main():
     n_pos = sum(p["label"] for p in all_pairs)
     print(f"  {len(all_pairs)} pairs  ({n_pos} positive, {len(all_pairs)-n_pos} negative)")
 
-    train_pairs, val_pairs = split_pairs_by_article(all_pairs, args.holdout, args.seed)
-    print(f"  train: {len(train_pairs)}  val: {len(val_pairs)}")
+    def split_tensors(split):
+        """u_j, u_k and labels of the --<split>-pairs, from that split's own features."""
+        f = load_features(getattr(args, f"{split}_features"), layer=layer)[0]
+        after = getattr(args, f"{split}_features_after")
+        fa = load_features(after, layer=layer)[0] if after else None
+        pairs = resolve(load_pairs(getattr(args, f"{split}_pairs")), first_rows(getattr(args, f"{split}_features")))
+        return pairs_to_tensors(pairs, f, fa)
 
-    train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features, features_after)
-    val_uj,   val_uk,   val_y   = pairs_to_tensors(val_pairs, features, features_after)
+    if args.val_pairs:
+        train_pairs = all_pairs
+        train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features, features_after)
+        val_uj, val_uk, val_y = split_tensors("val")
+    else:
+        train_pairs, val_pairs = split_pairs_by_article(all_pairs, args.holdout, args.seed)
+        train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features, features_after)
+        val_uj,   val_uk,   val_y   = pairs_to_tensors(val_pairs, features, features_after)
+    print(f"  train: {len(train_y)}  val: {len(val_y)}")
 
     if len(set(val_y.tolist())) < 2 or len(set(train_y.tolist())) < 2:
         raise SystemExit("the train or validation pairs hold a single class; AUROC and early stopping need both")
@@ -369,6 +395,21 @@ def main():
         device=device, lr=args.lr, wd=args.wd, batch=args.batch,
         max_epochs=args.max_epochs, patience=args.patience,
     )
+
+    if args.test_pairs:
+        test_uj, test_uk, test_y = split_tensors("test")
+        head.eval()
+        probs = torch.cat([head.to(device).predict(test_uj[i:i + 4096].to(device), test_uk[i:i + 4096].to(device)).cpu()
+                           for i in range(0, len(test_y), 4096)]).numpy()
+        labels = test_y.numpy()
+        pred = probs >= metrics["tau_c"]
+        tp = int((pred & (labels == 1)).sum())
+        p = tp / max(int(pred.sum()), 1)
+        r = tp / max(int((labels == 1).sum()), 1)
+        metrics["test"] = {"auroc": auroc(probs, labels), "precision": p, "recall": r,
+                           "f1": 2 * p * r / (p + r) if p + r else 0.0, "pairs": len(labels),
+                           "positives": int(labels.sum())}
+        print(f"  test AUROC {metrics['test']['auroc']:.4f}  F1 {metrics['test']['f1']:.4f} at tau_c {metrics['tau_c']}")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

@@ -12,8 +12,12 @@ not contain) also occurs in another sentence of the outdated article is left
 out of both files, because the article itself states the fix. Generators
 before that rule produced about 13% such links.
 
-A seeded fraction of the articles with a link becomes the evaluation set and
-the rest give training pairs, so no article is in both. With --heads-holdout,
+--role train writes pairs from every linked article and no labels, for the
+train split. --role eval writes labels for every linked article and pairs
+from them too, for the val and test splits, whose pairs score the
+consequence head. With the default --role holdout, a seeded fraction of the
+articles with a link becomes the evaluation set and the rest give training
+pairs, so no article is in both. With --heads-holdout,
 the evaluation set is instead the linked articles among those that
 classifier.train and staleness.train hold out with the same fraction and seed
 (classifier.train.split_by_article over the file order), so the loop and the
@@ -46,6 +50,8 @@ are development numbers, and final numbers come from the test split.
 
 Usage:
     python -m cascading.links ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
+    python -m cascading.links split/train.jsonl split/links/train --role train
+    python -m cascading.links split/test.jsonl split/links/test --role eval
 """
 
 import argparse
@@ -203,6 +209,8 @@ def main():
     parser.add_argument("--neg-per-pos", type=int, default=NEG_PER_POS)
     parser.add_argument("--hard-per-pos", type=int, default=HARD_PER_POS)
     parser.add_argument("--heads-holdout", type=float, help="hold out the heads' held-out articles, this fraction")
+    parser.add_argument("--role", choices=["holdout", "train", "eval"], default="holdout",
+                        help="train: pairs only; eval: labels and pairs of every linked article")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -215,7 +223,11 @@ def main():
     print(f"{excluded} links left out because the outdated article states the cascade fix elsewhere")
     rng = random.Random(args.seed)
     linked = [r for r in records if r.get("cascades")]
-    if args.heads_holdout:
+    if args.role == "train":
+        held_ids = set()
+    elif args.role == "eval":
+        held_ids = {r["id"] for r in linked}
+    elif args.heads_holdout:
         import numpy as np
         n = len(records)
         chosen = set(np.random.default_rng(args.seed).choice(n, size=max(1, round(args.heads_holdout * n)), replace=False).tolist())
@@ -225,9 +237,12 @@ def main():
         rng.shuffle(order)
         held_ids = {linked[i]["id"] for i in order[:round(args.eval_fraction * len(linked))]}
     held = {i for i, r in enumerate(linked) if r["id"] in held_ids}
-    # Hard negatives come from every article outside the held-out set, linked or not.
-    train_records = [r for r in records if r["id"] not in held_ids]
-    cues = cue_words([r for r in linked if r["id"] not in held_ids])
+    # Pairs come from the articles outside the held-out set, or from every
+    # linked article of an eval split. Hard negatives come from the same
+    # records, linked or not.
+    paired = (lambda r: True) if args.role == "eval" else (lambda r: r["id"] not in held_ids)
+    train_records = [r for r in records if paired(r)]
+    cues = cue_words([r for r in linked if paired(r)])
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -242,9 +257,9 @@ def main():
                 labels.write(json.dumps(row) + "\n")
                 cascades += len(row["cascade_sentences"])
                 shared += sum(c["shares_mention_with_direct"] for c in row["cascade_sentences"])
-        train_pairs = [pair for i, record in enumerate(linked) if i not in held for pair in pairs(record, rng, args.neg_per_pos)]
+        train_pairs = [pair for record in linked if paired(record) for pair in pairs(record, rng, args.neg_per_pos)]
         if args.hard_per_pos:
-            train_pairs += hard_negatives([r for i, r in enumerate(linked) if i not in held] +
+            train_pairs += hard_negatives([r for r in linked if paired(r)] +
                                           [r for r in train_records if not r.get("cascades")], cues, rng, args.hard_per_pos,
                                           taken=train_pairs)
         for pair in train_pairs:
@@ -258,7 +273,7 @@ def main():
     by_id = {r["id"]: r for r in records}
     for kind, cue in sorted(cues.items(), key=lambda x: str(x[0])):
         hits = [pair["label"] for pair in train_pairs if cue.search(by_id[pair["article_id"]]["source_sentences"][pair["k"]].lower())]
-        positives = sum(1 for r in linked if r["id"] not in held_ids for link in r["cascades"] if link.get("kind") == kind)
+        positives = sum(1 for r in linked if paired(r) for link in r["cascades"] if link.get("kind") == kind)
         print(f"  {kind}: {positives} positives, {len(hits)} pairs whose k holds a cue word, "
               f"{sum(hits) / max(1, len(hits)):.2f} of them positive")
 
