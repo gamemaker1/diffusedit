@@ -3,9 +3,9 @@
 A synthetic record lists its injected pairs in "cascades", one
 {"direct": j, "cascade": k} link each, so the cascades of Section 8.5 are
 known without hand labels or mining. The direct edits of such an article are
-its EDIT and DROP sentences that are not the cascade of a link. A FRUIT
-record has no links, and its direct edits are the "direct" entries of its
-"changes" field.
+its EDIT and DROP sentences that are not the cascade of a link. A record
+without links has no cascades, and all its EDIT and DROP sentences are
+direct edits.
 
 A seeded fraction of the articles with a link becomes the evaluation set and
 the rest give training pairs, so no article is in both.
@@ -21,7 +21,7 @@ the rest give training pairs, so no article is in both.
                   pairs (j, k'), as in Section 6.4.
 
 Usage:
-    python -m cascading.links ../datasets/synthetic/cascades.jsonl pairs/synthetic
+    python -m cascading.links ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
 """
 
 import argparse
@@ -36,22 +36,16 @@ NEG_PER_POS = 3
 
 
 def target(record, i):
-    """The gold rewrite of source sentence i in either schema, or "" for a deleted sentence."""
+    """The gold rewrite of source sentence i, or "" for a deleted sentence."""
     entry = record["labels"][i]
-    if "target" in entry:
-        return entry["target"] if entry["label"] != "DROP" else ""
-    if entry.get("target_idx") is None:
-        return ""
-    return record["target_sentences"][entry["target_idx"]]["text"]
+    return entry["target"] if entry["label"] != "DROP" else ""
 
 
 def direct(record):
     """Indices of the direct edits, the changed sentences whose change the evidence supports."""
-    if "cascades" in record:
-        cascades = {link["cascade"] for link in record["cascades"]}
-        return sorted(i for i, entry in enumerate(record["labels"])
-                      if entry["label"] != "KEEP" and i not in cascades)
-    return sorted(c["idx"] for c in record.get("changes", []) if c["kind"] == "direct")
+    cascades = {link["cascade"] for link in record.get("cascades", [])}
+    return sorted(i for i, entry in enumerate(record["labels"])
+                  if entry["label"] != "KEEP" and i not in cascades)
 
 
 def label_row(record, m):

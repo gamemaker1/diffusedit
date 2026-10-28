@@ -10,7 +10,7 @@ where:
   - MLP has one hidden layer of width 512
 
 Training:
-  - Positive pairs: from mine.py (direct edit ↔ cascade edit)
+  - Positive pairs: the cascade links of cascading.links (direct edit ↔ cascade edit)
   - Negative pairs: same direct edit + KEEP sentences (3 negatives per positive)
   - Loss: binary cross-entropy
   - Optimizer: AdamW(lr=1e-3, wd=1e-2), batch 512, early stop on val AUROC
@@ -18,16 +18,11 @@ Training:
 u_j comes from --features-after, the features of the oracle-repaired view
 (cascading.views), so that the direct edit enters in its corrected version.
 Without --features-after it comes from --features, the outdated version. Pairs
-name sentences either by feature row ("j_row", "k_row", from cascading.mine)
-or by article and sentence index ("article_id", "j", "k", from cascading.links).
+name sentences by article and sentence index ("article_id", "j", "k").
 
 Usage:
-    python -m cascading.train \\
-        --features features/train \\
-        --pairs pairs/cascade_pairs.jsonl \\
-        --out heads/cascade
-    python -m cascading.train --features features/cascades --features-after features/cascades-after \\
-        --pairs pairs/synthetic/pairs.jsonl --out heads/cascade
+    python -m cascading.train --features features/cascade/source --features-after features/cascade/after \\
+        --pairs ../datasets/synthetic/cascade/pairs.jsonl --out heads/consequence
 """
 
 import argparse
@@ -107,9 +102,9 @@ def load_features(directory: str | Path, layer: int | None = None) -> tuple[np.n
 
 
 def load_pairs(pairs_path: str | Path) -> tuple[list[dict], list[dict], list[int]]:
-    """Load mined cascade pairs from mine.py output.
+    """Load cascade pairs from cascading.links output.
 
-    Each line: {"article_id", "j_row", "k_row", "label": 0|1, "similarity"}
+    Each line: {"article_id", "j", "k", "label": 0|1}
 
     Returns:
         pairs: list of pair dicts
@@ -133,15 +128,9 @@ def first_rows(directory: str | Path) -> dict[str, int]:
 
 
 def resolve(pairs: list[dict], starts: dict[str, int]) -> list[dict]:
-    """Add j_row and k_row to pairs that name sentences by article and index."""
-    out = []
-    for p in pairs:
-        if "j_row" not in p:
-            if p["article_id"] not in starts:
-                continue
-            p = {**p, "j_row": starts[p["article_id"]] + p["j"], "k_row": starts[p["article_id"]] + p["k"]}
-        out.append(p)
-    return out
+    """Add the feature rows j_row and k_row, skipping pairs of articles without features."""
+    return [{**p, "j_row": starts[p["article_id"]] + p["j"], "k_row": starts[p["article_id"]] + p["k"]}
+            for p in pairs if p["article_id"] in starts]
 
 
 def pairs_to_tensors(
@@ -296,7 +285,7 @@ def main():
     parser.add_argument("--features-after",
                         help="features of the oracle-repaired view, for u_j (cascading.views)")
     parser.add_argument("--pairs", required=True,
-                        help="JSONL of cascade pairs from cascading.mine or cascading.links")
+                        help="JSONL of cascade pairs from cascading.links")
     parser.add_argument("--out", required=True,
                         help="output directory for head.pt and config.json")
     parser.add_argument("--layer", type=int, default=None,

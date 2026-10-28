@@ -16,7 +16,7 @@ Sentence counts and order stay as in the source, so row i of the source
 features and row i of a view's features hold the same sentence.
 
 Usage:
-    python -m cascading.views ../datasets/synthetic/cascades.jsonl ../datasets/synthetic/views
+    python -m cascading.views ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
 """
 
 import argparse

@@ -22,7 +22,7 @@ The detectors read these inputs.
 Labels file (JSONL, one record per article, from cascading.links or by hand):
     {
         "article_id": str,
-        "direct": [int, ...],       // when absent, the record's "changes"
+        "direct": [int, ...],       // when absent, cascading.links.direct
         "cascade_sentences": [
             {"sentence_idx": int, "label": "cascade"|"stylistic",
              "shares_mention_with_direct": bool},
@@ -31,8 +31,8 @@ Labels file (JSONL, one record per article, from cascading.links or by hand):
     }
 
 Precision counts every flagged sentence that is not a labelled cascade as a
-false flag. That holds for synthetic links, where every cascade is labelled.
-On hand-labelled FRUIT sentences it is a lower bound.
+false flag. Every cascade of a synthetic record is a recorded link, so no
+flagged sentence is a cascade without a label.
 
 Usage:
     python -m cascading.evaluate --data ../datasets/synthetic/cascades.jsonl \\

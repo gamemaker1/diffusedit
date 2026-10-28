@@ -1,127 +1,55 @@
 # Cascading Edit Detection
 
-This package implements the cascade detection system from Sections 6.4, 7.3 and 8.5 of the DiffusEdit technical design.
+> Detectors that flag sentences made wrong by the repair of another sentence (Sections 6.4, 7.3 and 8.5 of the technical design).
 
-## What is a Cascading Edit?
+A cascading edit is a sentence that the evidence does not contradict but that depends on a sentence the evidence does contradict. In "Three people died, and the small death toll limited the political fallout", an update of the count to 42 contradicts the first clause, and the second clause becomes wrong only because of it. A round of Algorithm 1 repairs the direct edits, and a detector then flags the sentences outside the repaired set Δ that the next round treats as EDIT.
 
-When an article says *"Three people died and the small death toll limited the political fallout"*, and the true count is updated to 42, the first sentence is directly contradicted by evidence. The second sentence is wrong in a quieter way — it rests on the now-false premise of a small toll. An editor who fixes the first sentence and stops has left the article internally inconsistent. The second sentence is a **cascading edit**.
+## Detectors
 
-## Module Structure
-
-```
-cascading/
-├── mentions.py    M(text): named entity + digit string extractor (Section 7.3)
-├── detectors.py   Four cascade detectors: (a) mention overlap, (b) edited as evidence, (c) staleness delta, (d) consequence prediction
-├── train.py       ConsequenceHead training — Equation 8
-├── mine.py        Cascade pair mining from silver training data (Section 8.5)
-└── evaluate.py    Cascade recall evaluation on hand-labeled pairs (Section 9.2)
-```
-
-## Four Detectors
-
-### (a) Mention Overlap — `MentionOverlapDetector`
-No training. Flags sentence `s_k` when its mention set `M(s_k)` shares at least one string with the mentions of any sentence repaired this round. High recall, low precision baseline.
-
-```bash
-# No training needed — use directly in infilling.run
-```
-
-### (b) Using Edited Sentences as New Evidence — `EditedAsEvidenceDetector`
-If the evidence holds $k$ snippets in round $r$ and $p$ sentences are edited in that round, we append the $p$ edited sentences to the evidence and use the $k + p$ snippets in round $r + 1$. A sentence that a repair made wrong then conflicts with a sentence in the evidence, so the existing heads can flag it.
-
-- `detector.augment_evidence(evidence, repaired_sentences, round_idx)`: Appends newly repaired sentences as snippets to the evidence.
-- `detector.flag(...)`: Flags candidate sentences that conflict with the augmented evidence or share key entities with the new snippets.
-
-### (c) Staleness Delta — `StalenessDeltaDetector`
-No training. Re-scores every sentence under the fresh hidden states (after repairs) and flags sentences whose staleness score rose into the top 10th percentile and crosses `τ_2`. Requires the existing staleness head.
-
-```bash
-# No training needed — requires --staleness-head from staleness.train
-```
-
-### (d) Consequence Prediction — `ConsequenceDetector`
-Trained head (Equation 8). For each repaired sentence `s_j` and each unrepaired sentence `s_k`:
-
-```
-g_jk = σ( MLP_ψ( [u_j ; u_k ; u_j ⊙ u_k ; |u_j − u_k|] ) )
-```
-
-`u_j` is the LLaDA pooled vector of `s_j` in its **corrected** version; `u_k` is `s_k` in its **outdated** version. Flags `s_k` if `g_jk ≥ τ_c`.
-
-## Training the Consequence Head
-
-### Step 1 — Mine Training Pairs (Section 8.5)
-
-```bash
-python -m cascading.mine \
-    --data datasets/collated/train.jsonl \
-    --features features/train \
-    --out pairs/cascade_pairs.jsonl \
-    --threshold 0.6
-```
-
-This produces `pairs/cascade_pairs.jsonl` with positive (cascade) and negative (keep) pairs. Before training, hand-label 200 mined pairs. If fewer than ~60% are genuine cascades, drop consequence prediction and rely on detectors (a) and (b).
-
-### Step 2 — Train the Head
-
-```bash
-python -m cascading.train \
-    --features features/train \
-    --pairs pairs/cascade_pairs.jsonl \
-    --out heads/cascade
-```
-
-### Step 3 — Evaluate Cascade Recall (Section 9.2)
-
-```bash
-# Detector (a): mention overlap
-python -m cascading.evaluate \
-    --data datasets/collated/train.jsonl \
-    --labels pairs/eval_labels.jsonl \
-    --features features/train \
-    --detector mention \
-    --out eval/cascade_mention.json
-
-# Detector (c): consequence prediction
-python -m cascading.evaluate \
-    --data datasets/collated/train.jsonl \
-    --labels pairs/eval_labels.jsonl \
-    --features features/train \
-    --detector consequence \
-    --cascade-head heads/cascade \
-    --tau-c 0.5 \
-    --out eval/cascade_consequence.json
-```
-
-Results are broken into:
-- **Group A**: cascades sharing a mention with a direct edit (all three detectors can reach these)
-- **Group B**: cascades without shared mention (only Detector (c) can reach these)
-
-Detector (a) scores 0 on Group B by construction — this is the gap Detector (c) is designed to close.
-
-## Integration with `infilling/run.py`
-
-The cascade module plugs into **Algorithm 1, line 8** of `infilling/run.py`:
-
-```python
-from cascading.detectors import MentionOverlapDetector
-
-detector = MentionOverlapDetector()
-
-# After each infilling round:
-flagged = detector.flag(
-    sentences=current_sentences,
-    delta_r=repaired_this_round,      # set[int] of sentence indices
-    pooled_before=H_before,           # [n_sents, d] from previous encode
-    pooled_after=H_after,             # [n_sents, d] from line-7 re-encode
-)
-# flagged sentences enter the next round as EDIT
-```
-
-## Expected Performance (from the paper's framing)
-
-| Detector | Group A recall | Group B recall | Training needed |
+| Detector | Class | Inputs | Training |
 |---|---|---|---|
-| (a) Mention overlap | High | 0% by construction | None |
-| (b) Staleness delta | Medium | Medium | None (uses staleness head) |
-| (c) Consequence pred | High | Non-zero | Yes — `cascading.train` |
+| Mention overlap | `MentionOverlapDetector` | sentences before and after the round | none |
+| Edited as evidence | `EditedAsEvidenceDetector` | classifier head over the evidence with the repairs appended | none |
+| Staleness delta | `StalenessDeltaDetector` | staleness head over the hidden states before and after the round | none |
+| Consequence prediction | `ConsequenceDetector` | consequence head over u_j (corrected) and u_k (outdated) | `cascading.train` |
+
+Mention overlap flags a sentence that shares a named entity or digit string with either version of a repaired sentence, so it cannot reach a cascade without a shared mention. Staleness delta flags a sentence that enters the top tenth of staleness scores after the round, was not there before, and scores at least `tau2`. Consequence prediction flags `s_k` when `g_jk >= tau_c` for some repaired `s_j`.
+
+## Data
+
+The cascade set is generated by `synthetic.generate`, which records each injected pair as a `{"direct": j, "cascade": k}` link in the `cascades` field of the record. Labels and training pairs come from these links, so no mining or hand labelling is needed. Commands run from `code/pipeline`, except the generator, which runs from `code`.
+
+```bash
+(cd .. && python -m synthetic.generate --seed-file datasets/synthetic/split/train.jsonl --n 5000 \
+    --cascade-prob 1.0 --prefix cascade- --out datasets/synthetic/cascade/source.jsonl)
+python -m cascading.links ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
+python -m cascading.views ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
+```
+
+`cascading.links` holds out a seeded 20% of the linked articles for evaluation and writes `labels.jsonl` for them and `pairs.jsonl` for the rest. `cascading.views` writes `after.jsonl`, the articles with every direct edit replaced by its gold rewrite, and `evidence.jsonl`, the same with the rewrites appended to the evidence.
+
+## Usage
+
+Hidden states of the three files, then the consequence head and the evaluation of each detector:
+
+```bash
+for v in source after evidence; do
+    python -m classifier.extract ../datasets/synthetic/cascade/$v.jsonl features/cascade/$v --no-tokens
+done
+python -m cascading.train --features features/cascade/source --features-after features/cascade/after \
+    --pairs ../datasets/synthetic/cascade/pairs.jsonl --out heads/consequence
+
+D=../datasets/synthetic/cascade
+python -m cascading.evaluate --data $D/source.jsonl --labels $D/labels.jsonl --detector mention --out eval/mention.json
+python -m cascading.evaluate --data $D/source.jsonl --labels $D/labels.jsonl --detector consequence \
+    --features features/cascade/source --features-after features/cascade/after \
+    --cascade-head heads/consequence --out eval/consequence.json
+python -m cascading.evaluate --data $D/source.jsonl --labels $D/labels.jsonl --detector staleness_delta \
+    --features features/cascade/source --features-after features/cascade/after \
+    --staleness-head heads/staleness/head.pt --out eval/staleness_delta.json
+python -m cascading.evaluate --data $D/source.jsonl --labels $D/labels.jsonl --detector edited_as_evidence \
+    --features-evidence features/cascade/evidence --classifier-head heads/classifier/layer32/head.pt \
+    --out eval/edited_as_evidence.json
+```
+
+The evaluation repairs the direct edits of each article with their gold rewrites, sets Δ to the direct edits, and reports cascade recall for cascades that share a mention with a direct edit (Group A) and for those that do not (Group B), with precision and flag rate.

@@ -11,7 +11,8 @@ Features:
 - Direct JSONL output matching classifier.inputs.build() requirements.
 
 Usage:
-    python -m code.synthetic.generate --n 1000 --out datasets/synthetic/train.jsonl
+    python -m synthetic.generate --seed-file datasets/synthetic/split/train.jsonl --n 5000 \
+        --cascade-prob 1.0 --prefix cascade- --out datasets/synthetic/cascade/source.jsonl
 """
 
 import argparse
@@ -225,11 +226,18 @@ class SyntheticGenerator:
         )
 
     def generate_dataset(self, n_records: int, prefix: str = "synthetic-") -> list[SyntheticRecord]:
-        """Generate N synthetic article records."""
-        records = []
+        """Generate N synthetic article records.
+
+        Seeds are drawn without replacement in a shuffled order, so no two
+        records share a seed until every seed has been used once.
+        """
+        records, order = [], []
         for i in range(n_records):
+            if not order:
+                order = list(range(len(self.seeds)))
+                self.rng.shuffle(order)
             rec_id = f"{prefix}{i:06d}"
-            records.append(self.generate_one(rec_id))
+            records.append(self.generate_one(rec_id, base_sentences=self.seeds[order.pop()]))
         return records
 
 
@@ -258,7 +266,10 @@ def load_seeds_from_file(path: str | Path) -> list[list[str]]:
                 line = line.strip()
                 if line:
                     data = json.loads(line)
-                    sents = data.get("source_sentences", [])
+                    # A synthetic record's gold article is its target_sentences;
+                    # its source sentences hold the injected errors.
+                    target = data.get("target_sentences", [])
+                    sents = target if target and isinstance(target[0], str) else data.get("source_sentences", [])
                     if len(sents) >= 2:
                         seeds.append(sents)
     else:
@@ -327,7 +338,7 @@ def stream_hf_wikipedia(
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n", type=int, default=500, help="number of records to generate")
-    parser.add_argument("--out", type=str, default="datasets/synthetic/train.jsonl", help="output jsonl path")
+    parser.add_argument("--out", type=str, required=True, help="output jsonl path")
     parser.add_argument(
         "--seed-source",
         choices=["file", "hf-wikipedia", "default"],
@@ -338,6 +349,7 @@ def main():
     parser.add_argument("--hf-dataset", type=str, default="wikimedia/wikipedia", help="Hugging Face dataset identifier")
     parser.add_argument("--hf-config", type=str, default="20231101.en", help="Hugging Face dataset config")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
+    parser.add_argument("--prefix", type=str, default="synthetic-", help="prefix of the record ids")
     parser.add_argument("--edit-prob", type=float, default=0.35, help="probability of EDIT per sentence")
     parser.add_argument("--drop-prob", type=float, default=0.10, help="probability of DROP per sentence")
     parser.add_argument("--cascade-prob", type=float, default=0.25, help="probability of cascade injection")
@@ -364,7 +376,7 @@ def main():
         print(f"Generating {args.n} synthetic records from streamed Hugging Face Wikipedia articles...")
         with open(args.out, "w", encoding="utf-8") as f_out:
             for article_sents in stream_hf_wikipedia(args.n, dataset_name=args.hf_dataset, config=args.hf_config):
-                rec_id = f"synthetic-{record_count:06d}"
+                rec_id = f"{args.prefix}{record_count:06d}"
                 rec = generator.generate_one(rec_id, base_sentences=article_sents)
                 f_out.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
 
@@ -383,7 +395,7 @@ def main():
             generator.seeds = seeds
 
         print(f"Generating {args.n} synthetic records with seed {args.seed}...")
-        records = generator.generate_dataset(args.n)
+        records = generator.generate_dataset(args.n, prefix=args.prefix)
         write_jsonl(records, args.out)
         record_count = len(records)
         total_sentences = sum(len(r.source_sentences) for r in records)
