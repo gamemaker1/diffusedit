@@ -8,7 +8,11 @@ without links has no cascades, and all its EDIT and DROP sentences are
 direct edits.
 
 A seeded fraction of the articles with a link becomes the evaluation set and
-the rest give training pairs, so no article is in both.
+the rest give training pairs, so no article is in both. With --heads-holdout,
+the evaluation set is instead the linked articles among those that
+classifier.train and staleness.train hold out with the same fraction and seed
+(classifier.train.split_by_article over the file order), so the loop and the
+detectors are scored on articles no head was fitted on.
 
     labels.jsonl  the format of cascading.evaluate, one line per evaluation
                   article, with its direct edits and its cascade sentences.
@@ -77,14 +81,24 @@ def main():
     parser.add_argument("out", help="directory for labels.jsonl and pairs.jsonl")
     parser.add_argument("--eval-fraction", type=float, default=0.2, help="share of linked articles held out for evaluation")
     parser.add_argument("--neg-per-pos", type=int, default=NEG_PER_POS)
+    parser.add_argument("--heads-holdout", type=float, help="hold out the heads' held-out articles, this fraction")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    linked = [r for r in read_jsonl(args.data) if r.get("cascades")]
+    records = list(read_jsonl(args.data))
     rng = random.Random(args.seed)
-    order = list(range(len(linked)))
-    rng.shuffle(order)
-    held = set(order[:round(args.eval_fraction * len(linked))])
+    if args.heads_holdout:
+        import numpy as np
+        n = len(records)
+        chosen = set(np.random.default_rng(args.seed).choice(n, size=max(1, round(args.heads_holdout * n)), replace=False).tolist())
+        linked = [r for r in records if r.get("cascades")]
+        held_ids = {records[a]["id"] for a in chosen}
+        held = {i for i, r in enumerate(linked) if r["id"] in held_ids}
+    else:
+        linked = [r for r in records if r.get("cascades")]
+        order = list(range(len(linked)))
+        rng.shuffle(order)
+        held = set(order[:round(args.eval_fraction * len(linked))])
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
