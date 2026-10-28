@@ -8,7 +8,9 @@ fp16 compute (Turing has no native bf16), batch size 1. On compute capability
 
 The same pass also stores the unpooled hidden state of every token inside an
 EDIT sentence, from one layer, with its stale label, for the token staleness
-head (Eq. 7).
+head (Eq. 7). With evidence in the input, it also stores the hidden state of
+every evidence token from that layer, which the attention head of
+staleness.attention attends over.
 
 Output directory:
     config.json    model, quantization, layers, source file
@@ -20,6 +22,9 @@ Output directory:
     tokens/layer{L}.npy  float16 [n_tokens, d], one row per EDIT-sentence token
     tokens/labels.npy    int8 [n_tokens], 1 if the token is stale
     tokens/row.npy       int32 [n_tokens], the token's sentence row
+    tokens/evidence_layer{L}.npy   float16 [n_evidence_tokens, d], every evidence token
+    tokens/evidence_offsets.npy    int64 [n_articles + 1], article k's evidence
+                                   tokens are rows offsets[k] to offsets[k + 1]
 
 Usage:
     python -m classifier.extract ../datasets/synthetic/split/train.jsonl features/train
@@ -108,6 +113,8 @@ def main():
                         help="store EDIT-sentence token states")
     parser.add_argument("--evidence", action=argparse.BooleanOptionalAction, default=True,
                         help="put the evidence before the article; --no-evidence is the control that reads the article alone")
+    parser.add_argument("--evidence-tokens", action=argparse.BooleanOptionalAction, default=True,
+                        help="with --tokens, also store the token states of the evidence")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is not available")
@@ -127,6 +134,11 @@ def main():
     token_counts = [sum(len(m) for m in e.stale if m is not None) for e in examples]
     token_offsets = np.cumsum([0] + token_counts) if args.tokens else np.zeros(len(examples) + 1, dtype=np.int64)
     n_tokens = int(token_offsets[-1])
+    keep_evidence = args.tokens and args.evidence and args.evidence_tokens
+    evidence_token_counts = [e.evidence_spans[-1][1] - e.evidence_spans[0][0] if keep_evidence and e.evidence_spans else 0
+                             for e in examples]
+    evidence_token_offsets = np.cumsum([0] + evidence_token_counts).astype(np.int64)
+    n_evidence_tokens = int(evidence_token_offsets[-1])
 
     model = load_model(args.model, args.quant)
     blocks_name, blocks = find_blocks(model)
@@ -152,6 +164,8 @@ def main():
         "token_layer": token_layer,
         "tokens": n_tokens,
     }
+    if n_evidence_tokens:
+        config["evidence_tokens"] = n_evidence_tokens
     if not args.evidence:
         config["evidence"] = False
     progress_path = out / "progress.json"
@@ -175,7 +189,9 @@ def main():
                              for j, m in enumerate(e.stale) if m is not None]
             np.save(out / "tokens" / "row.npy",
                     np.repeat(np.asarray(sentence_rows, dtype=np.int32), [len(m) for m in marks]))
-        progress = {"articles": 0, "rows": 0, "evidence_rows": 0, "tokens": 0, "nonfinite": 0}
+            if n_evidence_tokens:
+                np.save(out / "tokens" / "evidence_offsets.npy", evidence_token_offsets)
+        progress = {"articles": 0, "rows": 0, "evidence_rows": 0, "tokens": 0, "evidence_tokens": 0, "nonfinite": 0}
         mode = "w+"
     memmaps = {
         layer: np.lib.format.open_memmap(out / f"layer{layer}.npy", mode=mode, dtype=np.float16, shape=(rows, d))
@@ -190,15 +206,20 @@ def main():
     if token_layer:
         token_mm = np.lib.format.open_memmap(out / "tokens" / f"layer{token_layer}.npy", mode=mode,
                                              dtype=np.float16, shape=(n_tokens, d))
+    evidence_token_mm = None
+    if n_evidence_tokens:
+        evidence_token_mm = np.lib.format.open_memmap(out / "tokens" / f"evidence_layer{token_layer}.npy", mode=mode,
+                                                      dtype=np.float16, shape=(n_evidence_tokens, d))
 
     def save_progress(k):
-        for mm in [*memmaps.values(), *evidence_memmaps.values(), token_mm]:
+        for mm in [*memmaps.values(), *evidence_memmaps.values(), token_mm, evidence_token_mm]:
             if mm is not None:
                 mm.flush()
         progress["articles"] = k
         progress["rows"] = int(offsets[k])
         progress["evidence_rows"] = int(evidence_offsets[k])
         progress["tokens"] = int(token_offsets[k])
+        progress["evidence_tokens"] = int(evidence_token_offsets[k])
         progress_path.write_text(json.dumps(progress))
 
     store = {}
@@ -235,6 +256,9 @@ def main():
                 parts = [hidden[a:b] for (a, b), m in zip(example.spans, example.stale) if m is not None]
                 if parts:
                     token_mm[token_offsets[k]:token_offsets[k + 1]] = torch.cat(parts).half().cpu().numpy()
+                if evidence_token_mm is not None and example.evidence_spans:
+                    a, b = example.evidence_spans[0][0], example.evidence_spans[-1][1]
+                    evidence_token_mm[evidence_token_offsets[k]:evidence_token_offsets[k + 1]] = hidden[a:b].half().cpu().numpy()
             store.clear()
 
             done = k + 1

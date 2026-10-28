@@ -58,7 +58,7 @@ def parse():
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--quant", choices=["4bit", "8bit", "none"], default="4bit")
     parser.add_argument("--masks", choices=["oracle", "predicted"], default="oracle")
-    parser.add_argument("--staleness-head", help="head.pt from staleness.train, for --masks predicted")
+    parser.add_argument("--staleness-head", help="head.pt from staleness.train or staleness.attention, for --masks predicted")
     parser.add_argument("--tau", type=float, help="mask threshold; default the head's tuned tau")
     parser.add_argument("--c-max", type=int, default=C_MAX, help="remask budget per token")
     parser.add_argument("--whole-words", action=argparse.BooleanOptionalAction, default=True,
@@ -101,20 +101,41 @@ def settings_of(args):
 
 
 def load_head(path, device):
+    """A function from (hidden [L, d], example) to a stale probability per position, its layer and tau.
+
+    The head is the linear head of staleness.train or the evidence attention
+    head of staleness.attention, told apart by the checkpoint's "kind".
+    """
     ckpt = torch.load(path, map_location=device)
-    weight = ckpt["state_dict"]["weight"]
-    head = torch.nn.Linear(weight.shape[1], 1).to(device)
-    head.load_state_dict(ckpt["state_dict"])
-    return head.eval(), ckpt["mean"].to(device), ckpt["std"].to(device), ckpt["layer"], ckpt["tau"]
+    if ckpt.get("kind") == "attention":
+        from staleness.attention import Scorer
+        scorer = Scorer(ckpt, device)
+
+        def score(hidden, example):
+            first, last = example.spans[0][0], example.spans[-1][1]
+            ev = example.evidence_spans
+            pi = hidden.new_zeros(len(hidden))
+            pi[first:last] = scorer(hidden, (first, last), (ev[0][0], ev[-1][1]) if ev else None)
+            return pi
+    else:
+        weight = ckpt["state_dict"]["weight"]
+        head = torch.nn.Linear(weight.shape[1], 1).to(device)
+        head.load_state_dict(ckpt["state_dict"])
+        head.eval()
+        mean, std = ckpt["mean"].to(device), ckpt["std"].to(device)
+
+        def score(hidden, example):
+            return head((hidden - mean) / std).sigmoid()[:, 0]
+    return score, ckpt["layer"], ckpt["tau"]
 
 
-def stale_scores(model, example, head, mean, std, layer):
+def stale_scores(model, example, head, layer):
     """Token staleness pi_i (Eq. 7) for every sentence, from one frozen pass."""
     ids = torch.from_numpy(example.input_ids.astype(np.int64))[None].to(model.device)
     model.passes["score"] += 1
     hidden = model.hidden(ids, layer)[0].float()
     with torch.inference_mode():
-        pi = head((hidden - mean) / std).sigmoid()[:, 0].cpu().numpy()
+        pi = head(hidden, example).cpu().numpy()
     return [pi[a:b] for a, b in example.spans]
 
 
@@ -154,7 +175,7 @@ def main():
         verifier = Verifier(args.verifier, model.device, args.support_index)
     head = None
     if args.masks == "predicted":
-        head, mean, std, layer, tuned_tau = load_head(args.staleness_head, model.device)
+        head, layer, tuned_tau = load_head(args.staleness_head, model.device)
         tau = tuned_tau if args.tau is None else args.tau
         print(f"staleness head at layer {layer}, tau {tau}")
 
@@ -179,7 +200,7 @@ def main():
             article = Article.from_example(example, tok.bos_token_id)
 
             if head is not None:
-                scores = stale_scores(model, example, head, mean, std, layer)
+                scores = stale_scores(model, example, head, layer)
             spans = {}
             for j, label in enumerate(example.labels):
                 if label == EDIT:
