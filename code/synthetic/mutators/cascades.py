@@ -30,8 +30,11 @@ sentence is added. The strategies are tried in random order.
               other sentence about them uses pronouns ("an American
               actress", "She ..."). The noun takes the other gender, and so
               do the pronouns of every such k, so one j has up to three
-              cascades. The article holds no other gendered noun, no
-              honorific and no pronoun of the other gender.
+              cascades. The subject's first name becomes a name of the other
+              gender wherever it occurs, which must be in j or a cascade, so
+              the name does not reveal the stale pronouns. The article holds
+              no other gendered noun, no honorific and no pronoun of the
+              other gender.
     field     j names the subject's occupation and up to three other
               sentences name its field ("physicist", "physics"). The
               occupation becomes another of its family (groups of similar
@@ -125,6 +128,33 @@ COMPOUNDS = [(f"{w}man", f"{w}woman") for w in ("business", "sports", "chair", "
 OPPOSITE = {**dict(GENDERED), **{f: m for m, f in GENDERED}}
 FEMALE = {f for _, f in GENDERED}
 GENDERED_WORDS = set(OPPOSITE) | {w for pair in COMPOUNDS for w in pair}
+# First names that the seed biographies use for one gender only. The gender
+# kind gives the subject a name of the gender it swaps to, so the name does
+# not show which pronouns are stale.
+FIRST_NAMES = {
+    "M": ["Robert", "James", "David", "Michael", "Thomas", "Richard", "Charles", "Paul", "Joseph", "Mark", "Edward",
+          "Daniel", "Andrew", "Brian", "Stephen", "Alexander", "Christopher", "Walter", "Henry", "Matthew", "Arthur",
+          "Kevin", "Harry", "Steve", "Ronald", "Albert", "Alan", "Eric", "Frank", "Scott", "Alfred", "Donald", "Philip",
+          "Samuel", "Jason", "Jeffrey", "Jonathan", "Patrick", "Tom", "Jack", "Juan", "Anthony", "Benjamin", "Gary",
+          "Hans", "Fred", "Roger", "Carl", "Howard", "Bruce", "Mohammad", "Neil", "Adam", "Kenneth", "Stuart", "Carlos",
+          "Ralph", "Louis", "Lawrence", "Hugh", "Ian", "Victor", "Herbert", "Frederick", "Mike", "Johann", "Tony"],
+    "F": ["Mary", "Lisa", "Anna", "Anne", "Maria", "Jessica", "Barbara", "Susan", "Jennifer", "Sarah", "Kate",
+          "Elizabeth", "Helen", "Patricia", "Nancy", "Margaret", "Ann", "Catherine", "Julia", "Jane", "Suzanne",
+          "Dorothy", "Cynthia", "Caroline", "Stephanie", "Laura", "Carol", "Sharon", "Judith", "Louise", "Linda",
+          "Nicole", "Amanda", "Christine", "Sophie", "Rebecca", "Hannah", "Diane", "Alice", "Amy", "Sara", "Jill",
+          "Claire", "Pamela", "Edna", "Kathryn", "Rachel", "Natalie", "Angela", "Cheryl", "Katherine", "Ruth", "Amelia",
+          "Frances", "Allison", "Alexandra", "Cathy", "Olga", "Irene", "Vanessa", "Michelle", "Lucy", "Kimberly",
+          "Megan", "Elena", "Holly", "Sally"],
+}
+# The first name of a sentence that opens with a person's name: "Laura Johnson is ...",
+# 'Edward "Gunboat" Smith was ...', "Darío Grandinetti is ...". NOT_NAMES are capitalized
+# words that open such sentences without being a first name.
+SUBJECT = re.compile(r"""^([A-ZÀ-Þ][^\W\d_]{2,})(?=\s+(?:"[^"]+"\s+)?(?:[A-ZÀ-Þ][\w.'-]*\s+){0,3}[A-ZÀ-Þ][^\W\d_]+)""")
+NOT_NAMES = {"The", "This", "These", "That", "His", "Her", "Its", "Saint", "King", "Queen", "Prince", "Princess", "Lord",
+             "Lady", "Pope", "Emperor", "Empress", "General", "Captain", "Major", "Colonel", "Admiral", "Doctor",
+             "Professor", "Reverend", "Father", "Mother", "Sister", "Brother", "Bishop", "Cardinal", "President",
+             "Senator", "Governor", "Judge", "Chief", "Duke", "Duchess", "Count", "Countess", "Baron", "Baroness",
+             "Sheikh", "Sultan", "Rabbi", "Imam", "Saint", "Blessed", "Little", "Big", "Young", "Old", "Uncle", "Aunt"}
 PRONOUNS = {"M": re.compile(r"\b(?:he|him|his|himself)\b", re.IGNORECASE),
             "F": re.compile(r"\b(?:she|her|hers|herself)\b", re.IGNORECASE)}
 HONORIFIC = re.compile(r"\b(?:Sir|Dame|Mr|Mrs|Ms|Miss|Madame|Lady|Lord)\b")
@@ -278,7 +308,8 @@ class CascadeMutator:
         """The pair of direct edit j (replacements rj) and the cascades {k: replacements of k}."""
         mutated_j, spans_j = apply(sentences[j], disjoint(rj))
         cascade_edits = {k: apply(sentences[k], disjoint(rks)) for k, rks in sorted(edits.items())}
-        fixes = sorted({r.original for rks in edits.values() for r in disjoint(rks)})
+        # Strings that j's fix also corrects, such as a renamed subject, are not cascade fixes.
+        fixes = sorted({r.original for rks in edits.values() for r in disjoint(rks)} - {r.original for r in rj})
         return CascadePair(j, sentences[j], mutated_j, spans_j, cascade_edits, concept, strategy, fixes)
 
     def _century(self, sentences, article, order):
@@ -466,6 +497,21 @@ class CascadeMutator:
                          for p in PRONOUNS[gender].finditer(sentences[k])] for k in ks}
             noun = m.group("noun")
             rj = [Replacement(m.start("noun"), m.end("noun"), noun, OPPOSITE[noun], "ROLE")]
+            # The subject's first name takes the swapped gender too. It may occur only in j and the cascades.
+            first = SUBJECT.match(sentences[0])
+            if first and first.group(1) not in NOT_NAMES:
+                name = first.group(1)
+                holding = {i for i, s in enumerate(sentences) if word(name).search(s)}
+                names = [n for n in FIRST_NAMES["F" if gender == "M" else "M"] if not word(n).search(text)]
+                if not holding <= {j, *ks} or not names:
+                    return None
+                new = self.rng.choice(names)
+                for i in holding:
+                    renamed = [Replacement(n.start(), n.end(), name, new, "PERSON") for n in word(name).finditer(sentences[i])]
+                    if i == j:
+                        rj += renamed
+                    else:
+                        edits[i] += renamed
             return self._pair(sentences, j, rj, edits, f"{noun} / {'she' if gender == 'F' else 'he'}", "gender")
         return None
 
