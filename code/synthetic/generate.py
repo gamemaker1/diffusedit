@@ -236,6 +236,17 @@ class SyntheticGenerator:
             if other is not base_sentences:
                 optional.append(snippet(self.writer.support(self.rng.choice(other)), "support", other))
 
+        if cascade_pair:
+            # No snippet may state the cascade's fix, in its title or its text.
+            patterns = [re.compile(rf"(?<!\w){re.escape(f.lower())}(?!\w)") for f in cascade_pair.cascade_fixes]
+            def leaks(s):
+                return any(p.search(f"{s['title']} {s['text']}".lower()) for p in patterns)
+            for s in required:
+                if leaks(s):
+                    # A title without an entity or year holds no fix string. A
+                    # required text (a retraction quoting a DROP sentence) stays.
+                    s["title"] = self.writer.title(None, None)
+            optional = [s for s in optional if not leaks(s)]
         self.rng.shuffle(optional)
         while optional and sum(len(s["title"]) + len(s["text"]) for s in required + optional) > self.EVIDENCE_CHARS:
             optional.pop()

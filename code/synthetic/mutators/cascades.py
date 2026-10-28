@@ -19,10 +19,12 @@ sentence is added. The strategies are tried in random order.
               j names another country and k its demonym.
 
 In every strategy j must not hold k's string, and k must not hold j's, so
-neither sentence gives the other's fix away.
+neither sentence gives the other's fix away. A pair is also rejected when the
+correct string of k occurs in any other sentence of the article, since the
+article would then state k's fix itself.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
 import re
 
@@ -84,6 +86,12 @@ def disjoint(replacements):
     return out
 
 
+def fix_elsewhere(sentences, pair):
+    """True when a correct string of k's fix occurs in a sentence other than k."""
+    others = " ".join(s for i, s in enumerate(sentences) if i != pair.cascade_sentence_idx)
+    return any(re.search(rf"(?<!\w){re.escape(f)}(?!\w)", others, re.IGNORECASE) for f in pair.cascade_fixes)
+
+
 def century(year):
     return (year - 1) // 100 + 1
 STRATEGIES = ("century", "decade", "location", "demonym")
@@ -101,6 +109,8 @@ class CascadePair:
     cascade_stale_spans: list[tuple[int, int]]
     shared_concept: str
     strategy: str
+    # The correct strings of k's fix. No evidence may hold them.
+    cascade_fixes: list[str] = field(default_factory=list)
 
 
 def word(text):
@@ -115,7 +125,8 @@ class CascadeMutator:
     def _pair(self, sentences, j, k, rj, rks, concept, strategy):
         mutated_j, spans_j = apply(sentences[j], disjoint(rj))
         mutated_k, spans_k = apply(sentences[k], disjoint(rks))
-        return CascadePair(j, k, sentences[j], mutated_j, spans_j, sentences[k], mutated_k, spans_k, concept, strategy)
+        return CascadePair(j, k, sentences[j], mutated_j, spans_j, sentences[k], mutated_k, spans_k, concept, strategy,
+                           sorted({r.original for r in rks}))
 
     def _century(self, sentences, article, order):
         text = " ".join(sentences)
@@ -225,6 +236,6 @@ class CascadeMutator:
         self.rng.shuffle(order)
         for strategy in self.rng.sample(STRATEGIES, len(STRATEGIES)):
             pair = getattr(self, f"_{strategy}")(sentences, article, order)
-            if pair is not None:
+            if pair is not None and not fix_elsewhere(sentences, pair):
                 return pair
         return None

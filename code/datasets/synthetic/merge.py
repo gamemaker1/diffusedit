@@ -9,6 +9,7 @@ records and keeps an article only if its passages pass every check:
     no passage holds the wrong text of a stale span
     every DROP sentence has a passage about it
     no passage copies seven consecutive words of a sentence
+    (every check reads a passage's title as well as its text)
     no passage is about a cascade sentence or holds one of its "avoid"
     strings (tasks.cascade_avoid), so only the direct edit is supported
 
@@ -45,6 +46,11 @@ def gold_spans(source, target, spans):
     return out
 
 
+def full(passage):
+    """Title and text, both of which the model reads."""
+    return f"{passage['title']} {passage['text']}"
+
+
 def check(record, passages):
     """None if the passages are valid for the record, else the reason."""
     if not passages or any(not isinstance(p, dict) or not p.get("title") or not p.get("text")
@@ -57,7 +63,7 @@ def check(record, passages):
         if entry["label"] == "EDIT":
             for _, right in gold_spans(source, entry["target"], entry["stale_spans"]):
                 copied -= shingles(right)
-    if any(shingles(p["text"]) & copied for p in passages):
+    if any((shingles(p["title"]) | shingles(p["text"])) & copied for p in passages):
         return "copied"
     from tasks import cascade_avoid
     avoid = cascade_avoid(record)
@@ -66,10 +72,10 @@ def check(record, passages):
             return "cascade_about"
         for s in strings:
             pattern = rf"(?<!\w){re.escape(s.lower())}(?!\w)"
-            if any(re.search(pattern, p["text"].lower()) for p in passages):
+            if any(re.search(pattern, full(p).lower()) for p in passages):
                 return "cascade_supported"
     for j, (source, entry) in enumerate(zip(record["source_sentences"], record["labels"])):
-        about = [p["text"].lower() for p in passages if j in p["about"]]
+        about = [full(p).lower() for p in passages if j in p["about"]]
         if entry["label"] == "DROP" and not about:
             return "drop_without_passage"
         if entry["label"] != "EDIT":
@@ -78,7 +84,7 @@ def check(record, passages):
             if j not in avoid and not any(right.lower() in text for text in about):
                 return "gold_absent"
             pattern = rf"(?<!\w){re.escape(wrong.lower())}(?!\w)"
-            if article.count(wrong.lower()) == 1 and any(re.search(pattern, p["text"].lower()) for p in passages):
+            if article.count(wrong.lower()) == 1 and any(re.search(pattern, full(p).lower()) for p in passages):
                 return "wrong_present"
     return None
 

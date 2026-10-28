@@ -77,6 +77,7 @@ class EntityBank:
 
     def __init__(self, seeds, nlp=_NLP, batch_size=256):
         self.by_label = defaultdict(set)
+        self.by_shape = {}
         self.sentence_entities = {}
         self.article_entities = []
         if nlp is None:
