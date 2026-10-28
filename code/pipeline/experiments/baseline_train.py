@@ -190,14 +190,16 @@ def main():
     embedder = Embedder(args.model, device=str(device))
 
     print(f"train: {args.train}")
-    if args.cache and Path(args.cache).exists():
-        cached = np.load(args.cache)
+    # The cache is keyed by the train file and model, so a cache from another set is rebuilt, not reused.
+    key = f"{Path(args.train).resolve()}|{Path(args.train).stat().st_size}|{args.model}"
+    cached = np.load(args.cache) if args.cache and Path(args.cache).exists() else None
+    if cached is not None and "key" in cached and str(cached["key"]) == key:
         x_all, y_all = torch.from_numpy(cached["x"]), torch.from_numpy(cached["y"])
         article, n_articles = cached["article"], int(cached["n_articles"])
     else:
         x_all, y_all, article, n_articles = build_features(args.train, embedder)
         if args.cache:
-            np.savez(args.cache, x=x_all.numpy(), y=y_all.numpy(), article=article, n_articles=n_articles)
+            np.savez(args.cache, x=x_all.numpy(), y=y_all.numpy(), article=article, n_articles=n_articles, key=key)
     if args.val:
         print(f"val: {args.val}")
         x_val, y_val, _, _ = build_features(args.val, embedder)
