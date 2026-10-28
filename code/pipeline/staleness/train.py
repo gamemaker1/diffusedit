@@ -21,16 +21,20 @@ classifier.train.split_by_article. With the same seed and holdout fraction,
 the sentence head and the token head hold out the same articles. Their ids go
 to heldout_ids.json in --out, for infilling.run --ids.
 
+With --val, the head fits on every train token, val drives early stopping
+and tau, and --test is scored once with that tau. --save-predictions then
+writes the test token probabilities to test_predictions.npz.
+
 --loss focal replaces the weighted binary cross-entropy with a binary focal
-loss. --seeds trains once per seed, each with its own held-out split, and
-loads the token features once.
+loss. --seeds trains once per seed, each with its own initialization (and its
+own held-out split without --val), and loads the token features once.
 
 Usage:
     python -m staleness.train --train features/train --out heads/staleness
     python -m staleness.train --train features/train --loss focal --seeds 42 1 2 3 4 \
         --save-predictions --out heads/staleness_focal
     python -m staleness.train --train features/train --val features/val \
-        --eval features/test --out heads/staleness
+        --test features/test --out heads/staleness
 """
 
 import argparse
@@ -160,7 +164,7 @@ def focal_bce(logits, y, pos_weight, gamma):
     return -(pos_weight * y * (1 - p) ** gamma * logp + (1 - y) * p ** gamma * log1mp).sum()
 
 
-def train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, heldout=None):
+def train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, heldout=None, test=None):
     torch.manual_seed(seed)
     mean, std = (t.to(device) for t in moments(x_train))
     pw = pos_weight(y_train).to(device)
@@ -214,6 +218,12 @@ def train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, he
                "val": scores(y_val, (val_probs >= tau).float()),
                "holdout": None if args.val else args.holdout, "seed": seed, "loss": args.loss,
                "gamma": args.gamma if args.loss == "focal" else None}
+    if test is not None:
+        test_probs = predict(head, test[0], mean, std, device)
+        metrics["test"] = {**scores(test[1], (test_probs >= tau).float()),
+                           "pr_auc": pr_auc(test[1], test_probs), "auroc": auroc(test[1], test_probs)}
+        print(f"seed {seed}: test PR-AUC {metrics['test']['pr_auc']:.4f}  AUROC {metrics['test']['auroc']:.4f}  "
+              f"F1 {metrics['test']['f1']:.4f}")
     for directory in args.eval:
         eval_layer = token_layer_of(directory)
         if eval_layer != layer:
@@ -233,6 +243,9 @@ def train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, he
             np.savez_compressed(out / "heldout_predictions.npz", rows=heldout["rows"],
                                 probs=val_probs.numpy().astype(np.float16), labels=y_val.numpy().astype(np.int8),
                                 tau=tau)
+    if test is not None and args.save_predictions:
+        np.savez_compressed(out / "test_predictions.npz", probs=test_probs.numpy().astype(np.float16),
+                            labels=test[1].numpy().astype(np.int8), tau=tau)
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "layer": layer, "tau": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -242,6 +255,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
     parser.add_argument("--val", help="feature dir for val; if omitted a holdout is carved from train")
+    parser.add_argument("--test", help="feature dir scored once with the tuned tau")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
     parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to report on")
     parser.add_argument("--out", required=True)
@@ -258,8 +272,6 @@ def main():
     parser.add_argument("--save-predictions", action="store_true",
                         help="write held-out token probabilities to heldout_predictions.npz")
     args = parser.parse_args()
-    if args.val and args.seeds:
-        parser.error("--seeds varies the held-out split, so it needs the train holdout, not --val")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     layer = token_layer_of(args.train)
@@ -269,7 +281,10 @@ def main():
             raise SystemExit(f"train token_layer {layer} != val token_layer {val_layer}")
         x_train, y_train = load(args.train, layer)
         x_val, y_val = load(args.val, layer)
-        train_one(args, layer, x_train, y_train, x_val, y_val, args.seed, Path(args.out), device)
+        test = load(args.test, layer) if args.test else None
+        for seed in args.seeds or [args.seed]:
+            out = Path(args.out) / f"seed{seed}" if args.seeds else Path(args.out)
+            train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, test=test)
         return
 
     x_all, y_all = load(args.train, layer)

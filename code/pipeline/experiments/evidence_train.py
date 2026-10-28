@@ -24,7 +24,10 @@ number.
     attention  a learned query from the sentence vector attends over the
                article's snippets (keys are a learned projection, values the
                standardized snippet vectors). The attention and the linear
-               head train together. Held-out split only, no --val.
+               head train together.
+
+--test is scored once with the tau_d tuned on val (or on the held-out train
+articles without --val) and reported under "test".
 
 Usage:
     python -m experiments.evidence_train --train features/train --layer 24 \
@@ -32,7 +35,7 @@ Usage:
     python -m experiments.evidence_train \
         --train features/train \
         --val features/val \
-        --eval features/test \
+        --test features/test \
         --layer 32 --out heads/evidence_layer32
 """
 
@@ -151,56 +154,72 @@ def snippet_index(ev_article, n_articles, cap):
     return torch.from_numpy(index), int((counts > k).sum())
 
 
-def train_attention(args, device):
-    x_sent, y, article = load_sentence(args.train, args.layer)
-    x_ev, ev_article = load_evidence_rows(args.train, args.layer)
-    n_articles = int(article.max()) + 1
-    index, truncated = snippet_index(ev_article, n_articles, args.max_snippets)
-    fit, held = split_by_article(article, n_articles, args.holdout, args.seed)
-    fit_rows, held_rows = fit.nonzero()[:, 0], held.nonzero()[:, 0]
-    s_mean, s_std = (t.to(device) for t in moments(x_sent[fit_rows]))
-    e_mean, e_std = (t.to(device) for t in moments(x_ev))
-    art = torch.from_numpy(article).long()
-    weights = class_weights(y[fit_rows]).to(device)
-    print(f"train {len(fit_rows)} sentences, held out {len(held_rows)}, up to {index.shape[1]} snippets "
-          f"per article ({truncated} articles truncated)")
+class Snippets:
+    """Sentence states, labels and padded snippet indices of one feature directory."""
 
-    def inputs(rows):
-        u = (x_sent[rows].to(device).float() - s_mean) / s_std
-        idx = index[art[rows]]
+    def __init__(self, directory, layer, cap):
+        self.x, self.y, article = load_sentence(directory, layer)
+        self.x_ev, ev_article = load_evidence_rows(directory, layer)
+        self.n_articles = int(article.max()) + 1
+        self.index, self.truncated = snippet_index(ev_article, self.n_articles, cap)
+        self.article = article
+        self.art = torch.from_numpy(article).long()
+
+
+def train_attention(args, device):
+    train = Snippets(args.train, args.layer, args.max_snippets)
+    if args.val:
+        val = Snippets(args.val, args.layer, args.max_snippets)
+        fit_rows, held_rows = torch.arange(len(train.y)), torch.arange(len(val.y))
+    else:
+        val = train
+        fit, held = split_by_article(train.article, train.n_articles, args.holdout, args.seed)
+        fit_rows, held_rows = fit.nonzero()[:, 0], held.nonzero()[:, 0]
+    s_mean, s_std = (t.to(device) for t in moments(train.x[fit_rows]))
+    e_mean, e_std = (t.to(device) for t in moments(train.x_ev))
+    weights = class_weights(train.y[fit_rows]).to(device)
+    print(f"train {len(fit_rows)} sentences, val {len(held_rows)}, up to {train.index.shape[1]} snippets "
+          f"per article ({train.truncated} articles truncated)")
+
+    def inputs(data, rows):
+        u = (data.x[rows].to(device).float() - s_mean) / s_std
+        idx = data.index[data.art[rows]]
+        if idx.shape[1] < train.index.shape[1]:
+            idx = F.pad(idx, (0, train.index.shape[1] - idx.shape[1]), value=-1)
+        idx = idx[:, :train.index.shape[1]]
         mask = (idx >= 0).to(device)
-        e = (x_ev[idx.clamp_min(0)].to(device).float() - e_mean) / e_std * mask[..., None]
+        e = (data.x_ev[idx.clamp_min(0)].to(device).float() - e_mean) / e_std * mask[..., None]
         mask[~mask.any(1), 0] = True
         return u, e, mask
 
     @torch.no_grad()
-    def probs_of(model, rows):
+    def probs_of(model, data, rows):
         out, peak = [], []
         for i in range(0, len(rows), args.batch):
-            logits, a = model(*inputs(rows[i:i + args.batch]))
+            logits, a = model(*inputs(data, rows[i:i + args.batch]))
             out.append(logits.softmax(-1).cpu())
             peak.append(a.max(-1).values.cpu())
         return torch.cat(out), torch.cat(peak)
 
-    model = AttentionHead(x_sent.shape[1], args.attention_hidden).to(device)
+    model = AttentionHead(train.x.shape[1], args.attention_hidden).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best, best_state, stale = -1.0, None, 0
-    y_held = y[held_rows]
+    y_held = val.y[held_rows]
     for epoch in range(1, args.epochs + 1):
         model.train()
         order = fit_rows[torch.randperm(len(fit_rows))]
         total = 0.0
         for i in range(0, len(order), args.batch):
             rows = order[i:i + args.batch]
-            logits, _ = model(*inputs(rows))
-            loss = F.cross_entropy(logits, y[rows].to(device), weight=weights, reduction="sum") / len(rows)
+            logits, _ = model(*inputs(train, rows))
+            loss = F.cross_entropy(logits, train.y[rows].to(device), weight=weights, reduction="sum") / len(rows)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             total += loss.item() * len(rows)
         model.eval()
-        held_f1 = scores(y_held, probs_of(model, held_rows)[0].argmax(-1))["macro_f1"]
-        print(f"epoch {epoch}  loss {total / len(fit_rows):.4f}  held-out macro-F1 {held_f1:.4f}", flush=True)
+        held_f1 = scores(y_held, probs_of(model, val, held_rows)[0].argmax(-1))["macro_f1"]
+        print(f"epoch {epoch}  loss {total / len(fit_rows):.4f}  val macro-F1 {held_f1:.4f}", flush=True)
         if held_f1 > best:
             best, stale = held_f1, 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -211,13 +230,19 @@ def train_attention(args, device):
     model.load_state_dict(best_state)
     model.eval()
 
-    held_probs, peak = probs_of(model, held_rows)
+    held_probs, peak = probs_of(model, val, held_rows)
     sweep = {float(tau): scores(y_held, decide(held_probs, tau))["macro_f1"] for tau in TAU_GRID}
     tau = max(sweep, key=sweep.get)
-    print(f"tau_d {tau}  held-out macro-F1 {sweep[tau]:.4f}  mean peak attention {peak.mean():.3f}")
+    print(f"tau_d {tau}  val macro-F1 {sweep[tau]:.4f}  mean peak attention {peak.mean():.3f}")
     metrics = {"layer": args.layer, "evidence_pool": "attention", "tau_d": tau, "tau_sweep": sweep,
-               "holdout": args.holdout, "seed": args.seed, "val": scores(y_held, decide(held_probs, tau)),
-               "mean_peak_attention": peak.mean().item(), "max_snippets": index.shape[1]}
+               "holdout": None if args.val else args.holdout, "seed": args.seed,
+               "val": scores(y_held, decide(held_probs, tau)),
+               "mean_peak_attention": peak.mean().item(), "max_snippets": train.index.shape[1]}
+    if args.test:
+        test = Snippets(args.test, args.layer, args.max_snippets)
+        test_probs, _ = probs_of(model, test, torch.arange(len(test.y)))
+        metrics["test"] = scores(test.y, decide(test_probs, tau))
+        print(f"test macro-F1 {metrics['test']['macro_f1']:.4f}")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": model.state_dict(), "sentence_mean": s_mean.cpu(), "sentence_std": s_std.cpu(),
@@ -240,6 +265,7 @@ def main():
     parser.add_argument("--train", required=True)
     parser.add_argument("--val", default=None, help="feature dir for val; if omitted a holdout is carved from train")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
+    parser.add_argument("--test", help="feature dir scored once with the tuned tau_d")
     parser.add_argument("--eval", nargs="*", default=[], help="feature dirs to evaluate on")
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument("--out", required=True)
@@ -253,8 +279,8 @@ def main():
     parser.add_argument("--attention-hidden", type=int, default=256, help="query/key width for --evidence-pool attention")
     parser.add_argument("--max-snippets", type=int, default=32, help="snippets per article for --evidence-pool attention")
     args = parser.parse_args()
-    if args.evidence_pool == "attention" and (args.val or args.eval):
-        parser.error("--evidence-pool attention supports the held-out split only")
+    if args.evidence_pool == "attention" and args.eval:
+        parser.error("--evidence-pool attention takes --val and --test, not --eval")
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -319,6 +345,10 @@ def main():
 
     metrics = {"layer": args.layer, "evidence_pool": args.evidence_pool, "tau_d": tau, "tau_sweep": sweep,
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
+    if args.test:
+        x, y, _ = build_features(args.test, args.layer, args.evidence_pool)
+        metrics["test"] = scores(y, decide(predict(head, x, mean, std, device), tau))
+        print(f"test macro-F1 {metrics['test']['macro_f1']:.4f}")
     for directory in args.eval:
         x, y, _ = build_features(directory, args.layer, args.evidence_pool)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))

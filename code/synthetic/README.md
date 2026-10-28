@@ -52,6 +52,8 @@ Key parameters:
 - `--edit-prob`: Probability of an `EDIT` sentence (default: 0.35).
 - `--drop-prob`: Probability of a `DROP` sentence (default: 0.10).
 - `--cascade-prob`: Probability of injecting a cascading edit pair (default: 0.25).
+- `--cascade-kinds`: Comma-separated cascade kinds to try (default: all of century, decade, location, demonym, age, duration, gender, field).
+- `--require-cascade`: Edit every article and always try a cascade.
 - `--seed`: Deterministic random seed (default: 42).
 
 ### 2. Validate Generated Records

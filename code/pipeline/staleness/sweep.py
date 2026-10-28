@@ -1,13 +1,15 @@
 """Precision, recall and masked fraction of a trained staleness head per tau.
 
 staleness.train tunes tau for token F1, which favours recall: at its tau the
-head masks about 2.3 tokens per stale token. This script scores the same
-held-out articles (same seed and holdout fraction) at every tau of a grid and
+head masks about 2.3 tokens per stale token. This script scores the val
+features (--val), or without them the same held-out train articles (same seed
+and holdout fraction), at every tau of a grid and
 picks tau_match, the tau whose share of masked tokens is closest to the share
 of stale tokens. It also reports tau_f05, the tau with the best F0.5, which
 weighs precision twice as much as recall.
 
 Usage:
+    python -m staleness.sweep --val features/val --head heads/staleness/head.pt
     python -m staleness.sweep --train features/train --head heads/staleness/head.pt
 """
 
@@ -26,7 +28,8 @@ GRID = np.round(np.arange(0.05, 0.951, 0.05), 2)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--train", required=True)
+    parser.add_argument("--val", help="feature dir to sweep on")
+    parser.add_argument("--train", help="feature dir whose held-out articles are swept on, without --val")
     parser.add_argument("--head", required=True)
     parser.add_argument("--holdout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -39,10 +42,15 @@ def main():
     head.load_state_dict(ckpt["state_dict"])
     head.eval()
 
-    x_all, y_all = load(args.train, ckpt["layer"])
-    article, n_articles = token_articles(args.train)
-    _, held = split_by_article(article, n_articles, args.holdout, args.seed)
-    x, y = Rows(x_all, held.nonzero()[:, 0]), y_all[held]
+    if args.val:
+        x, y = load(args.val, ckpt["layer"])
+    elif args.train:
+        x_all, y_all = load(args.train, ckpt["layer"])
+        article, n_articles = token_articles(args.train)
+        _, held = split_by_article(article, n_articles, args.holdout, args.seed)
+        x, y = Rows(x_all, held.nonzero()[:, 0]), y_all[held]
+    else:
+        parser.error("give --val or --train")
     probs = predict(head, x, ckpt["mean"].to(device), ckpt["std"].to(device), device)
     stale = y.mean().item()
 

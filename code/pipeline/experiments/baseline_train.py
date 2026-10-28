@@ -14,7 +14,10 @@ sentence-transformers/all-MiniLM-L6-v2 (~80MB) via plain transformers
 (mean-pooling implemented by hand below, so no new sentence-transformers
 package dependency).
 
-Without --val, a seeded fraction of the train articles is held out, chosen by
+With --val, the head fits on all of train and val drives early stopping and
+tau_d. --test is scored once with that tau_d, and --save-predictions writes
+its probabilities to test_predictions.npz. Without --val, a seeded fraction
+of the train articles is held out, chosen by
 classifier.train.split_by_article, the same rule the LLaDA heads use.
 
 Usage:
@@ -101,7 +104,7 @@ def predict(head, x, mean, std, device, batch=8192):
     return torch.cat(probs)
 
 
-def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out, held_rows=None):
+def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out, held_rows=None, test=None):
     torch.manual_seed(seed)
     mean, std = (t.to(device) for t in moments(x_train))
     weights = class_weights(y_train).to(device)
@@ -147,6 +150,10 @@ def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out,
     metrics = {"model": args.model, "tau_d": tau, "tau_sweep": sweep,
                "holdout": None if args.val else args.holdout, "seed": seed,
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
+    if test is not None:
+        test_probs = predict(head, test[0], mean, std, device)
+        metrics["test"] = scores(test[1], decide(test_probs, tau))
+        print(f"seed {seed}: test macro-F1 {metrics['test']['macro_f1']:.4f}")
     for path in args.eval:
         x, y, _, _ = build_features(path, embedder)
         result = scores(y, decide(predict(head, x, mean, std, device), tau))
@@ -158,7 +165,11 @@ def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out,
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "model": args.model, "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    if args.save_predictions and held_rows is not None:
+    if args.save_predictions and test is not None:
+        np.savez_compressed(out / "test_predictions.npz", rows=np.arange(len(test[1])), article=test[2],
+                            probs=test_probs.numpy().astype(np.float32), labels=test[1].numpy().astype(np.int8),
+                            tau_d=tau)
+    elif args.save_predictions and held_rows is not None:
         np.savez_compressed(out / "heldout_predictions.npz", rows=held_rows,
                             probs=val_probs.numpy().astype(np.float32), labels=y_val.numpy().astype(np.int8),
                             tau_d=tau)
@@ -169,6 +180,7 @@ def main():
     parser.add_argument("--train", required=True)
     parser.add_argument("--val", help="dataset JSONL for val; if omitted a holdout is carved from train")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
+    parser.add_argument("--test", help="dataset JSONL scored once with the tuned tau_d")
     parser.add_argument("--eval", nargs="*", default=[])
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--out", required=True)
@@ -183,8 +195,6 @@ def main():
     parser.add_argument("--save-predictions", action="store_true",
                         help="write held-out probabilities to heldout_predictions.npz")
     args = parser.parse_args()
-    if args.val and args.seeds:
-        parser.error("--seeds varies the held-out split, so it needs the train holdout, not --val")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     embedder = Embedder(args.model, device=str(device))
@@ -200,10 +210,17 @@ def main():
         x_all, y_all, article, n_articles = build_features(args.train, embedder)
         if args.cache:
             np.savez(args.cache, x=x_all.numpy(), y=y_all.numpy(), article=article, n_articles=n_articles, key=key)
+    test = None
+    if args.test:
+        print(f"test: {args.test}")
+        x_t, y_t, a_t, _ = build_features(args.test, embedder)
+        test = (x_t, y_t, a_t)
     if args.val:
         print(f"val: {args.val}")
         x_val, y_val, _, _ = build_features(args.val, embedder)
-        train_one(args, x_all, y_all, x_val, y_val, args.seed, device, embedder, Path(args.out))
+        for seed in args.seeds or [args.seed]:
+            out = Path(args.out) / f"seed{seed}" if args.seeds else Path(args.out)
+            train_one(args, x_all, y_all, x_val, y_val, seed, device, embedder, out, test=test)
         return
     for seed in args.seeds or [args.seed]:
         fit, held = split_by_article(article, n_articles, args.holdout, seed)

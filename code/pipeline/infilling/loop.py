@@ -19,6 +19,13 @@ deleted, and a DROP that does not clear it becomes EDIT. Then, for up to
     4. The loop ends when no sentence is flagged or no flagged sentence has a
        maskable token left.
 
+With --second-pass, a round that repairs two or more sentences repairs each
+of them again, from its tokens before the round and at the same spans, with
+the round's other repairs placed before the evidence. A cascade sentence has
+no snippet of its own, so its fix can only come from the direct edit, and the
+first pass of a sentence k before its direct edit j in the article never
+reads the repaired j. The added snippets are dropped after the round.
+
 With --detector edited_as_evidence, the sentences repaired in round r are
 appended to the evidence before the encoding of step 2, so round r + 1 reads
 the k + p snippets. With --detector none the loop is one round.
@@ -155,6 +162,8 @@ def main():
     parser.add_argument("--cascade-head", help="directory of cascading.train, for --detector consequence")
     parser.add_argument("--tau2", type=float, default=0.5, help="staleness delta threshold")
     parser.add_argument("--tau-c", type=float, help="consequence threshold; default the head's tuned tau_c")
+    parser.add_argument("--second-pass", action="store_true",
+                        help="repair each sentence of a round again with the round's other repairs as evidence")
     args = parser.parse_args()
     check(parser, args)
     needs = {"consequence": "cascade_head", "staleness_delta": "staleness_head", "edited_as_evidence": "classifier_head"}
@@ -190,6 +199,8 @@ def main():
         tau = tuned_tau if args.tau is None else args.tau
     classifier = Classifier(args.classifier_head, model.device, args.tau_d) if args.classifier_head else None
     detector, detector_layer = build_detector(args, model.device)
+    from cascading.detectors import EditedAsEvidenceDetector
+    carry = EditedAsEvidenceDetector()
     layers = {layer for layer in (stale_layer, detector_layer, classifier and classifier.layer) if layer}
     print(f"labels {args.labels}, masks {args.masks}, detector {args.detector}, rounds {args.rounds}, "
           f"layers {sorted(layers)}, tau {tau}, tau_d {classifier and classifier.tau_d}")
@@ -255,7 +266,7 @@ def main():
                 scores = token_scores(states, spans_now, ev_range)
                 previous = [text(j) for j in range(n)]
                 before = {layer: pool(states[layer], spans_now) for layer in layers}
-                repaired = []
+                repaired, start = [], {}
                 for j in todo:
                     counts = article.counts[j]
                     if args.masks == "oracle" and np.array_equal(article.sentences[j], original[j]):
@@ -274,11 +285,29 @@ def main():
                         continue
                     stats["sentences"] += 1
                     masked = [tok.decode(article.sentences[j][a:b].tolist()) for a, b in spans]
+                    start[j] = (article.sentences[j], article.counts[j], spans)
                     decisions = repair_sentence(model, verifier, article, j, spans, evidence_text,
                                                 tok, settings, generator, stats)
                     repaired.append(j)
                     edits.append({"round": r, "sentence": j, "spans": [list(s) for s in spans],
                                   "masked": masked, "decisions": decisions})
+                if args.second_pass and len(repaired) > 1:
+                    # The other repairs of the round go before the evidence, as in
+                    # edited_as_evidence, for the sampler and for the verifier.
+                    prefix, round_edits = article.prefix, {e["sentence"]: e for e in edits if e["round"] == r}
+                    for j in repaired:
+                        extra = carry.augment_evidence(evidence, {i: text(i) for i in repaired if i != j}, r)
+                        set_evidence(article, tok, extra)
+                        first = text(j)
+                        article.sentences[j], article.counts[j], spans = start[j]
+                        decisions = repair_sentence(model, verifier, article, j, spans,
+                                                    [f"{s['title']}: {s['text']}" for s in extra],
+                                                    tok, settings, generator, Counter())
+                        round_edits[j]["first_pass"] = round_edits[j]["decisions"]
+                        round_edits[j]["decisions"] = decisions
+                        stats["second_pass"] += 1
+                        stats["second_pass_changed"] += text(j) != first
+                    article.prefix = prefix
                 delta = set(repaired) | set(deleted)
                 entry = {"round": r, "repaired": repaired, "deleted": deleted, "flagged": []}
                 rounds.append(entry)

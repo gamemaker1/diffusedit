@@ -17,7 +17,7 @@ The letters (a) to (c) are the paper's, and edited as evidence, from the progres
 
 ## Data
 
-The synthetic set records each injected cascade as a `{"direct": j, "cascade": k}` link in the `cascades` field of the record, so labels and training pairs come from these links and no mining or hand labelling is needed. In each link, the correct string of k (a century, a decade, a country or a demonym) differs from the fix of j, and the evidence states only j's fix, so k can be repaired only by reasoning from j. Commands run from `code/pipeline`.
+The synthetic set records each injected cascade as a `{"direct": j, "cascade": k, "kind": ...}` link in the `cascades` field of the record, so labels and training pairs come from these links and no mining or hand labelling is needed. In each link, the correct string of k differs from the fix of j, and the evidence states only j's fix, so k can be repaired only by reasoning from j. The kinds are century, decade, location (a city and its country), demonym, age, duration, gender (a gendered role noun and the subject's pronouns) and field (an occupation and its field), as described in `synthetic/mutators/cascades.py`. One j of the gender and field kinds may have several cascades. Commands run from `code/pipeline`.
 
 ```bash
 D=../datasets/synthetic/split
@@ -25,7 +25,7 @@ python -m cascading.links $D/train.jsonl $D --heads-holdout 0.1
 python -m cascading.views $D/train.jsonl $D
 ```
 
-`cascading.links` leaves out a link whose cascade fix also occurs in another sentence of the outdated article. With `--heads-holdout 0.1`, the evaluation articles in `labels.jsonl` are the linked articles among those the classifier and staleness heads hold out, and the other linked articles give `pairs.jsonl`. `cascading.views` writes `after.jsonl`, the articles with every direct edit replaced by its gold rewrite, and `evidence.jsonl`, the same with the rewrites added to the evidence.
+`cascading.links` leaves out a link whose cascade fix also occurs in another sentence of the outdated article. With `--heads-holdout 0.1`, the evaluation articles in `labels.jsonl` are the linked articles among those the classifier and staleness heads hold out, and the other linked articles give `pairs.jsonl`. Each cascade sentence in `labels.jsonl` carries its kind, so recall can be reported per kind. Besides random KEEP negatives, each positive pair draws hard negatives whose k holds a word of the same kind (a country name, a pronoun, a number) but does not depend on j, so that such a word alone does not predict a cascade. `cascading.views` writes `after.jsonl`, the articles with every direct edit replaced by its gold rewrite, and `evidence.jsonl`, the same with the rewrites added to the evidence.
 
 ## Usage
 

@@ -46,9 +46,9 @@ class SyntheticRecord:
     source_sentences: list[str]
     labels: list[SentenceLabel]
     target_sentences: list[str] = field(default_factory=list)
-    # One {"direct": j, "cascade": k} link per injected cascade pair: sentence k
-    # must change only because sentence j changed.
-    cascades: list[dict[str, int]] = field(default_factory=list)
+    # One {"direct": j, "cascade": k, "kind": ...} link per cascade sentence k,
+    # which must change only because sentence j changed. One j may have several.
+    cascades: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         targets = self.target_sentences or [l.target for l in self.labels if l.label != "DROP"]
