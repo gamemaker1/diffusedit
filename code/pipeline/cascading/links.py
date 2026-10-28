@@ -27,6 +27,9 @@ are development numbers, and final numbers come from the test split.
                   It is true when the mentions of both versions of k meet
                   the mentions of both versions of some direct edit. Each
                   cascade sentence also carries the kind of its link.
+    loop_ids.json the evaluation article ids in an order that cycles through
+                  the cascade kinds, shuffled within each kind, so that the
+                  first N ids for infilling.loop cover every kind.
     pairs.jsonl   one ordered pair per line, {"article_id", "j", "k", "label"}.
                   Each link (j, k) is a positive, and each positive draws up
                   to NEG_PER_POS KEEP sentences k' of its article as negative
@@ -107,6 +110,20 @@ def label_row(record, m):
     return {"article_id": record["id"], "direct": edits, "cascade_sentences": [
         {"sentence_idx": k, "label": "cascade", "kind": kinds[k], "shares_mention_with_direct": bool(both(k) & direct_m)}
         for k in sorted(kinds)]}
+
+
+def cycle_kinds(rows, rng):
+    """Article ids of label rows, taking one article of each kind in turn."""
+    by_kind = {}
+    for row in rows:
+        by_kind.setdefault(row["cascade_sentences"][0].get("kind"), []).append(row["article_id"])
+    queues = [by_kind[k] for k in sorted(by_kind, key=str)]
+    for q in queues:
+        rng.shuffle(q)
+    order = []
+    while any(queues):
+        order += [q.pop() for q in queues if q]
+    return order
 
 
 def keep(record):
@@ -216,10 +233,12 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     m = get_extractor()
     n_pairs = n_pos = shared = cascades = 0
+    rows = []
     with open(out / "labels.jsonl", "w") as labels, open(out / "pairs.jsonl", "w") as train:
         for i, record in enumerate(linked):
             if i in held:
                 row = label_row(record, m)
+                rows.append(row)
                 labels.write(json.dumps(row) + "\n")
                 cascades += len(row["cascade_sentences"])
                 shared += sum(c["shares_mention_with_direct"] for c in row["cascade_sentences"])
@@ -232,6 +251,7 @@ def main():
             train.write(json.dumps(pair) + "\n")
             n_pairs += 1
             n_pos += pair["label"]
+    (out / "loop_ids.json").write_text(json.dumps(cycle_kinds(rows, random.Random(args.seed))))
     print(f"{len(linked)} linked articles: {len(held)} for evaluation with {cascades} cascades "
           f"({shared} share a mention with a direct edit), {len(linked) - len(held)} for training "
           f"with {n_pairs} pairs ({n_pos} positive)")

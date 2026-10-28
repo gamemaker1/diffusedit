@@ -5,8 +5,9 @@ direct edits of each article with their gold rewrites and nothing else, so Δ
 is the direct set and every cascade sentence is still unrepaired. The detector then
 flags sentences outside Δ, and cascade recall is the fraction of cascade
 sentences it flags, reported for cascades that share a mention with a direct
-edit (Group A) and for those that do not (Group B). Mention overlap flags
-only sentences that share a mention string, so its Group B recall is 0.
+edit (Group A) and for those that do not (Group B), and for each cascade
+kind of cascading.links. Mention overlap flags only sentences that share a
+mention string, so its Group B recall is 0.
 
 The detectors read these inputs.
 
@@ -25,7 +26,7 @@ Labels file (JSONL, one record per article, from cascading.links or by hand):
         "direct": [int, ...],       // when absent, cascading.links.direct
         "cascade_sentences": [
             {"sentence_idx": int, "label": "cascade"|"stylistic",
-             "shares_mention_with_direct": bool},
+             "shares_mention_with_direct": bool, "kind": str},  // kind optional
             ...
         ]
     }
@@ -137,6 +138,7 @@ def main():
 
     labels = {row["article_id"]: row for row in read_jsonl(args.labels)}
     groups = {"shared": [0, 0], "unshared": [0, 0]}
+    kinds = {}
     flags = {"flagged": 0, "flagged_cascades": 0, "candidates": 0, "articles": 0}
     for record in read_jsonl(args.data):
         row = labels.get(record["id"])
@@ -156,9 +158,13 @@ def main():
 
         cascades = [c for c in row["cascade_sentences"] if c["label"] == "cascade"]
         for c in cascades:
+            hit = c["sentence_idx"] in flagged
             group = groups["shared" if c["shares_mention_with_direct"] else "unshared"]
-            group[0] += c["sentence_idx"] in flagged
+            group[0] += hit
             group[1] += 1
+            kind = kinds.setdefault(c.get("kind") or "unknown", [0, 0])
+            kind[0] += hit
+            kind[1] += 1
         flags["flagged"] += len(flagged)
         flags["flagged_cascades"] += len(flagged & {c["sentence_idx"] for c in cascades})
         flags["candidates"] += len(previous) - len(delta)
@@ -172,6 +178,7 @@ def main():
         "group_a_shared_mention": {"cascades": groups["shared"][1], "recall": ratio(*groups["shared"])},
         "group_b_no_shared_mention": {"cascades": groups["unshared"][1], "recall": ratio(*groups["unshared"])},
         "recall": ratio(groups["shared"][0] + groups["unshared"][0], groups["shared"][1] + groups["unshared"][1]),
+        "by_kind": {k: {"cascades": n, "recall": ratio(hits, n)} for k, (hits, n) in sorted(kinds.items())},
         "precision": ratio(flags["flagged_cascades"], flags["flagged"]),
         "flag_rate": ratio(flags["flagged"], flags["candidates"]),
     }
@@ -185,6 +192,8 @@ def main():
           f"precision {fmt(results['precision'])}, flag rate {fmt(results['flag_rate'])}")
     print(f"  group A (shared mention)    n={groups['shared'][1]}  recall {fmt(results['group_a_shared_mention']['recall'])}")
     print(f"  group B (no shared mention) n={groups['unshared'][1]}  recall {fmt(results['group_b_no_shared_mention']['recall'])}")
+    for k, v in results["by_kind"].items():
+        print(f"  {k:<27} n={v['cascades']}  recall {fmt(v['recall'])}")
 
 
 if __name__ == "__main__":
