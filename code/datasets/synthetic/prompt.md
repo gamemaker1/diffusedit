@@ -80,6 +80,9 @@ that bears on no sentence (`about: []`).
 - One passage may bear on several sentences when that reads naturally.
 - Invented supporting detail (dates, places, names of reporters) is fine. It
   must not contradict any `text` of a KEEP or EDIT sentence.
+- Many `right` strings differ from the real world on purpose, such as a
+  town placed in the wrong country. Treat every `text` as true and state its
+  `right` strings as given. Never correct them to what you know.
 - Sentences are sometimes fragments or lists. Write the best passage you can
   for them. Do not skip an article.
 - Order the passages of an article arbitrarily, not in sentence order.

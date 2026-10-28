@@ -16,14 +16,22 @@ the source and the mutated sentence the target:
               word, by its mutated string, so the evidence states the new
               values. Cascade sentences have no evidence of their own.
 
-The gender kind gave the subject a first name of the swapped gender in the
-mutated sentences. That swap is undone, so the target keeps the real name.
+Three changes are undone, so the sentence keeps its real text:
 
-A record is left out when a check fails:
+    names       the first name that the gender kind gave the subject
+    ambiguous   a gender link whose direct edit turns "actress" into "actor",
+                which is also used for women, so the new pronouns would not
+                follow from it. The direct edit and its cascades are undone.
+    conflict    a real string that two sentences mutate into different
+                strings. The later sentence's change is undone.
+
+A link whose direct or cascade sentence loses a span this way is removed,
+and its cascade sentences are undone with it.
+
+The evidence replacement then leaves a record out when a check fails:
 
     insertion   a stale span whose old gold text is empty, which has no
                 source token to mark
-    conflict    one old gold string maps to two mutated strings
     shared      an old gold string of a direct edit occurs in a source
                 sentence that does not change it, so the replacement would
                 also rewrite the evidence of that sentence
@@ -32,15 +40,14 @@ A record is left out when a check fails:
     cascade     a mutated string of a cascade sentence that its direct edit
                 does not contain is in the evidence (pronouns excepted, which
                 the evidence uses for other people)
-    ambiguous   a gender link whose direct edit turns "actress" into "actor",
-                which is also used for women, so the new pronouns do not
-                follow from it
 
-A link whose direct sentence loses all its spans to the name rule is dropped
-with that rule's record count.
+--flip-only writes every record that is not an insertion, with its evidence
+left as it was, for writers (prompt.md) to give new evidence through
+tasks.py and merge.py.
 
 Usage:
-    python reverse.py split/train.jsonl reversed/train.jsonl
+    python reverse.py split/train.jsonl reversed/train.jsonl --rejects reversed/train_rejects.json
+    python reverse.py rejected.jsonl flipped.jsonl --flip-only
 """
 
 import argparse
@@ -88,10 +95,46 @@ def same_case(new, old):
     return new
 
 
-def reverse(record):
-    """(reversed record, None) or (None, reason)."""
-    cascades = {link["cascade"]: link for link in record.get("cascades", [])}
-    gender = any(link.get("kind") == "gender" for link in cascades.values())
+def flip(record):
+    """(reversed record with the old evidence, changes {i: [(old, new)]}) or (None, "insertion")."""
+    gender = any(link.get("kind") == "gender" for link in record.get("cascades", []))
+    spans = {}
+    for i, (source, entry) in enumerate(zip(record["source_sentences"], record["labels"])):
+        if entry["label"] != "EDIT":
+            continue
+        kept = []
+        for a, b, c, d in edits(source, entry["target"], entry["stale_spans"]):
+            old, new = entry["target"][c:d], source[a:b]
+            if not old.strip():
+                return None, "insertion"
+            if gender and new in NAMES and old[:1].isupper() and " " not in old and old.lower() not in PRONOUNS:
+                continue
+            kept.append((c, d, old, new))
+        spans[i] = kept
+
+    links = list(record.get("cascades", []))
+    undo = set()
+    for link in links:
+        news = [new.lower() for _, _, _, new in spans.get(link["direct"], [])]
+        if link.get("kind") == "gender" and NEUTRAL & set(news):
+            undo |= {link["direct"], link["cascade"]}
+    mapping = {}
+    for i in sorted(spans):
+        if i in undo:
+            continue
+        for _, _, old, new in spans[i]:
+            if mapping.setdefault(old.lower(), new.lower()) != new.lower():
+                undo.add(i)
+    # A link loses both ends when either end is undone, until nothing changes.
+    while True:
+        more = {end for link in links if link["direct"] in undo or link["cascade"] in undo
+                for end in (link["direct"], link["cascade"]) if end not in undo}
+        if not more:
+            break
+        undo |= more
+    links = [link for link in links if link["direct"] not in undo and link["cascade"] not in undo
+             and spans.get(link["direct"]) and spans.get(link["cascade"])]
+
     sources, labels, changes = [], [], {}
     for i, (source, entry) in enumerate(zip(record["source_sentences"], record["labels"])):
         if entry["label"] != "EDIT":
@@ -99,14 +142,7 @@ def reverse(record):
             labels.append(entry)
             continue
         target = entry["target"]
-        kept = []
-        for a, b, c, d in edits(source, target, entry["stale_spans"]):
-            old, new = target[c:d], source[a:b]
-            if not old.strip():
-                return None, "insertion"
-            if gender and new in NAMES and old[:1].isupper() and " " not in old and old.lower() not in PRONOUNS:
-                continue
-            kept.append((c, d, old, new))
+        kept = [] if i in undo else spans[i]
         text = target
         for c, d, _, new in reversed(kept):
             text = text[:c] + new + text[d:]
@@ -116,30 +152,28 @@ def reverse(record):
             changes[i] = [(old, new) for _, _, old, new in kept]
         else:
             labels.append({"label": "KEEP", "stale_spans": [], "target": target})
+    targets = [entry["target"] for entry in labels if entry["label"] != "DROP"]
+    out = {**record, "source_sentences": sources, "labels": labels, "evidence": [dict(p) for p in record["evidence"]],
+           "target_sentences": targets, "target": " ".join(targets), "cascades": links}
+    return out, changes
 
-    links = [link for link in record.get("cascades", []) if link["direct"] in changes and link["cascade"] in changes]
+
+def substitute(record, changes):
+    """(record with evidence stating the mutated strings, None) or (None, reason)."""
+    links = record["cascades"]
     cascade_ids = {link["cascade"] for link in links}
     direct = {i: pairs for i, pairs in changes.items() if i not in cascade_ids}
-
-    mapping = {}
-    for pairs in direct.values():
-        for old, new in pairs:
-            if mapping.setdefault(old.lower(), new).lower() != new.lower():
-                return None, "conflict"
+    mapping = {old.lower(): new for pairs in direct.values() for old, new in pairs}
     for old in mapping:
-        for i, source in enumerate(sources):
+        for i, source in enumerate(record["source_sentences"]):
             if has(old, source) and not any(o.lower() == old for o, _ in changes.get(i, [])):
                 return None, "shared"
-
-    evidence = []
+    evidence = record["evidence"]
     if mapping:
         pattern = re.compile(r"(?<!\w)(%s)(?!\w)" % "|".join(
             re.escape(o) for o in sorted(mapping, key=len, reverse=True)), re.IGNORECASE)
         swap = lambda m: same_case(mapping[m.group(1).lower()], m.group(1))
-        evidence = [{"title": pattern.sub(swap, p["title"]), "text": pattern.sub(swap, p["text"])}
-                    for p in record["evidence"]]
-    else:
-        evidence = [dict(p) for p in record["evidence"]]
+        evidence = [{"title": pattern.sub(swap, p["title"]), "text": pattern.sub(swap, p["text"])} for p in evidence]
     full = " ".join(f"{p['title']} {p['text']}" for p in evidence)
     for pairs in direct.values():
         for old, new in pairs:
@@ -149,37 +183,39 @@ def reverse(record):
                 return None, "leftover"
     for link in links:
         news = [new for _, new in changes[link["direct"]]]
-        if link.get("kind") == "gender" and any(n.lower() in NEUTRAL for n in news):
-            return None, "ambiguous"
         for _, new in changes[link["cascade"]]:
             if new.lower() in PRONOUNS or any(has(new, n) for n in news):
                 continue
             if has(new, full):
                 return None, "cascade"
-
-    targets = [entry["target"] for entry in labels if entry["label"] != "DROP"]
-    out = {**record, "source_sentences": sources, "labels": labels, "evidence": evidence,
-           "target_sentences": targets, "target": " ".join(targets), "cascades": links}
-    return out, None
+    return {**record, "evidence": evidence}, None
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("data")
     parser.add_argument("out")
+    parser.add_argument("--flip-only", action="store_true", help="keep the old evidence and run no evidence check")
+    parser.add_argument("--rejects", help="write {id: reason} of the records left out here")
     args = parser.parse_args()
-    stats = Counter()
+    stats, rejects = Counter(), {}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.data) as f, open(args.out, "w") as out:
         for line in f:
             record = json.loads(line)
-            reversed_record, reason = reverse(record)
+            flipped, changes = flip(record)
+            reason = changes if flipped is None else None
+            if flipped is not None and not args.flip_only:
+                flipped, reason = substitute(flipped, changes)
             if reason:
                 stats[f"rejected_{reason}"] += 1
+                rejects[record["id"]] = reason
                 continue
             stats["kept"] += 1
-            stats["links_dropped"] += len(record.get("cascades", [])) - len(reversed_record["cascades"])
-            out.write(json.dumps(reversed_record, ensure_ascii=False) + "\n")
+            stats["links_removed"] += len(record.get("cascades", [])) - len(flipped["cascades"])
+            out.write(json.dumps(flipped, ensure_ascii=False) + "\n")
+    if args.rejects:
+        Path(args.rejects).write_text(json.dumps(rejects, indent=1))
     print(dict(sorted(stats.items())))
 
 
