@@ -9,9 +9,11 @@ records and keeps an article only if its passages pass every check:
     no passage holds the wrong text of a stale span
     every DROP sentence has a passage about it
     no passage copies seven consecutive words of a sentence
+    no passage is about a cascade sentence or holds one of its "avoid"
+    strings (tasks.cascade_avoid), so only the direct edit is supported
 
 Usage:
-    python merge.py rebuilt.jsonl passages/ train.jsonl
+    python merge.py regen/generated.jsonl regen/out regen/merged.jsonl --rejects regen/rejects.json
 """
 
 import argparse
@@ -57,6 +59,15 @@ def check(record, passages):
                 copied -= shingles(right)
     if any(shingles(p["text"]) & copied for p in passages):
         return "copied"
+    from tasks import cascade_avoid
+    avoid = cascade_avoid(record)
+    for k, strings in avoid.items():
+        if any(k in p["about"] for p in passages):
+            return "cascade_about"
+        for s in strings:
+            pattern = rf"(?<!\w){re.escape(s.lower())}(?!\w)"
+            if any(re.search(pattern, p["text"].lower()) for p in passages):
+                return "cascade_supported"
     for j, (source, entry) in enumerate(zip(record["source_sentences"], record["labels"])):
         about = [p["text"].lower() for p in passages if j in p["about"]]
         if entry["label"] == "DROP" and not about:
@@ -64,7 +75,7 @@ def check(record, passages):
         if entry["label"] != "EDIT":
             continue
         for wrong, right in gold_spans(source, entry["target"], entry["stale_spans"]):
-            if not any(right.lower() in text for text in about):
+            if j not in avoid and not any(right.lower() in text for text in about):
                 return "gold_absent"
             pattern = rf"(?<!\w){re.escape(wrong.lower())}(?!\w)"
             if article.count(wrong.lower()) == 1 and any(re.search(pattern, p["text"].lower()) for p in passages):
