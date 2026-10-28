@@ -4,9 +4,14 @@ Generates 100% noise-free synthetic training examples for sentence classificatio
 (KEEP/EDIT/DROP) and token staleness detection (stale_spans).
 
 Features:
-- Programmatic entity, date, and numeric perturbations.
-- Cascading edit pairs (s_j -> s_k) where s_j has direct evidence and s_k is downstream.
-- Retraction-based DROP sentences supported by explicit evidence.
+- Entity swaps drawn from the seed corpus itself, of the same type and shape,
+  often from the same article, and number and date changes of varied size.
+- One to three changed spans per EDIT sentence, and per-article edit rates.
+- Cascading edit pairs (s_j -> s_k) through a shared entity, a surname alias
+  or a country and its demonym, with evidence for s_j only.
+- Evidence in varied forms (synthetic/evidence.py): restatements, excerpts,
+  fact-sheet fields, retractions, confirmations of KEEP sentences in the same
+  frames, and snippets from other articles.
 - Pristine KEEP sentences with zero stylistic changes.
 - Direct JSONL output matching classifier.inputs.build() requirements.
 
@@ -30,10 +35,14 @@ if str(_curr) not in sys.path:
     sys.path.insert(0, str(_curr))
 
 try:
+    from .evidence import Writer
     from .mutators import CascadeMutator, EntityMutator, NumberMutator
+    from .mutators.entities import EntityBank, apply
     from .schema import EvidenceSnippet, SentenceLabel, SyntheticRecord, write_jsonl
 except ImportError:
+    from evidence import Writer
     from mutators import CascadeMutator, EntityMutator, NumberMutator
+    from mutators.entities import EntityBank, apply
     from schema import EvidenceSnippet, SentenceLabel, SyntheticRecord, write_jsonl
 
 
@@ -92,6 +101,27 @@ DEFAULT_SEEDS = [
 
 
 class SyntheticGenerator:
+    """Outdated articles with exact labels, made from correct seed articles.
+
+    Each article draws its own edit and drop rates around the global ones, and
+    a share P_UNCHANGED of articles keeps every sentence. An EDIT sentence
+    changes one to three entities, numbers or dates (SPANS_PER_EDIT). The
+    evidence states every EDIT fix, retracts every DROP sentence, restates a
+    share P_SUPPORT of KEEP sentences, confirms a share P_DECOY of them in the
+    frame of a retraction, and adds up to two snippets from other articles.
+    Snippets are merged in pairs with probability P_MERGE and shuffled, and
+    the optional ones are removed first when the evidence exceeds
+    EVIDENCE_CHARS.
+    """
+
+    P_UNCHANGED = 0.08
+    P_SUPPORT = 0.35
+    P_DECOY = 0.1
+    P_MERGE = 0.2
+    SPANS_PER_EDIT = ((1, 0.6), (2, 0.3), (3, 0.1))
+    DISTRACTORS = (0, 0, 1, 1, 2)
+    EVIDENCE_CHARS = 1800
+
     def __init__(
         self,
         seeds: list[list[str]] | None = None,
@@ -101,127 +131,138 @@ class SyntheticGenerator:
         cascade_prob: float = 0.20,
     ):
         self.rng = random.Random(seed)
-        self.seeds = seeds or DEFAULT_SEEDS
+        self.seeds = [[s.strip() for s in article] for article in (seeds or DEFAULT_SEEDS)]
         self.edit_prob = edit_prob
         self.drop_prob = drop_prob
         self.cascade_prob = cascade_prob
 
-        self.entity_mutator = EntityMutator(seed=seed)
+        self.bank = EntityBank(self.seeds)
+        self.entity_mutator = EntityMutator(seed=seed, bank=self.bank)
         self.number_mutator = NumberMutator(seed=seed + 1)
-        self.cascade_mutator = CascadeMutator(seed=seed + 2)
+        self.cascade_mutator = CascadeMutator(seed=seed + 2, bank=self.bank)
+        self.writer = Writer(random.Random(seed + 3))
+
+    def _edit(self, sentence, article):
+        """(mutated sentence, stale spans, fixed spans of the correct sentence), or None."""
+        options = self.entity_mutator.candidates(sentence, article) + self.number_mutator.candidates(sentence)
+        if not options:
+            return None
+        self.rng.shuffle(options)
+        k = self.rng.choices([n for n, _ in self.SPANS_PER_EDIT], weights=[w for _, w in self.SPANS_PER_EDIT])[0]
+        chosen = []
+        for r in options:
+            if len(chosen) < k and not any(r.start < c.end and r.end > c.start for c in chosen):
+                chosen.append(r)
+        mutated, spans = apply(sentence, chosen)
+        return mutated, spans, sorted((r.start, r.end) for r in chosen)
+
+    def _main_entity(self, article_sentences):
+        counts = {}
+        for s in article_sentences:
+            for _, _, text, label in self.bank.entities(s):
+                if label in ("PERSON", "ORG", "GPE", "FAC", "EVENT", "WORK_OF_ART", "LOC"):
+                    counts[text] = counts.get(text, 0) + 1
+        return max(sorted(counts), key=counts.get) if counts else None
 
     def generate_one(
-        self, record_id: str, base_sentences: list[str] | None = None
+        self, record_id: str, base_sentences: list[str] | None = None, seed_index: int | None = None
     ) -> SyntheticRecord:
         """Generate a single synthetic article record."""
-        # Pick a base article
         if base_sentences is None:
-            base_sentences = list(self.rng.choice(self.seeds))
+            seed_index = self.rng.randrange(len(self.seeds))
+            base_sentences = self.seeds[seed_index]
+        base = [s.strip() for s in base_sentences]
+        if seed_index is not None and seed_index < len(self.bank.article_entities):
+            article = self.bank.article_entities[seed_index]
         else:
-            base_sentences = list(base_sentences)
-        n_sentences = len(base_sentences)
+            article = {}
+            for s in base:
+                for _, _, text, label in self.bank.entities(s):
+                    article.setdefault(label, set()).add(text)
 
-        source_sentences = []
-        labels = []
-        evidence = []
+        if self.rng.random() < self.P_UNCHANGED:
+            edit_prob = drop_prob = 0.0
+        else:
+            edit_prob = min(0.9, self.edit_prob * self.rng.uniform(0.3, 1.7))
+            drop_prob = min(0.5, self.drop_prob * self.rng.uniform(0.0, 2.0))
 
-        # Decide whether to inject a cascading edit pair
+        required, optional = [], []
+
+        def snippet(text, kind, about=base):
+            year = next((m.group() for s in about for m in re.finditer(r"\b(1[5-9]\d\d|20[0-2]\d)\b", s)), None)
+            return {"title": self.writer.title(self._main_entity(about), year), "text": text, "kind": kind, "about": about}
+
         cascade_pair = None
-        if self.rng.random() < self.cascade_prob and n_sentences >= 3:
-            cascade_pair = self.cascade_mutator.find_and_inject_cascade(base_sentences)
+        if edit_prob and self.rng.random() < self.cascade_prob and len(base) >= 2:
+            cascade_pair = self.cascade_mutator.find_and_inject_cascade(base, article)
 
-        if cascade_pair:
-            # Evidence only contains information for the direct edit, not the cascade!
-            evidence.append(
-                EvidenceSnippet(
-                    title="Verified Update Briefing",
-                    text=f"Confirmed reporting states: {cascade_pair.direct_original}",
-                )
-            )
-
-        for i, original_sent in enumerate(base_sentences):
-            sent_clean = original_sent.strip()
-
-            # Handle cascade pair assignments
+        source_sentences, labels = [], []
+        for i, sentence in enumerate(base):
             if cascade_pair and i == cascade_pair.direct_sentence_idx:
                 source_sentences.append(cascade_pair.direct_mutated)
-                labels.append(SentenceLabel(
-                    label="EDIT",
-                    stale_spans=cascade_pair.direct_stale_spans,
-                    target=cascade_pair.direct_original,
-                ))
+                labels.append(SentenceLabel("EDIT", cascade_pair.direct_stale_spans, sentence))
+                focus = [(m.start(), m.end()) for m in re.finditer(re.escape(cascade_pair.shared_concept.split(" / ")[0]), sentence)]
+                required.append(snippet(self.writer.support(sentence, focus[:1] or None), "support"))
                 continue
-            elif cascade_pair and i == cascade_pair.cascade_sentence_idx:
+            if cascade_pair and i == cascade_pair.cascade_sentence_idx:
                 source_sentences.append(cascade_pair.cascade_mutated)
-                labels.append(SentenceLabel(
-                    label="EDIT",
-                    stale_spans=cascade_pair.cascade_stale_spans,
-                    target=cascade_pair.cascade_original,
-                ))
+                labels.append(SentenceLabel("EDIT", cascade_pair.cascade_stale_spans, sentence))
                 continue
 
             r = self.rng.random()
-
-            # 1. DROP (Retraction supported by explicit evidence)
-            if r < self.drop_prob:
-                evidence.append(
-                    EvidenceSnippet(
-                        title="Correction Notice",
-                        text=f"The claim that '{sent_clean}' was retracted following audit.",
-                    )
-                )
-                source_sentences.append(sent_clean)
-                labels.append(SentenceLabel(label="DROP", stale_spans=[], target=""))
+            if r < drop_prob:
+                source_sentences.append(sentence)
+                labels.append(SentenceLabel("DROP", [], ""))
+                required.append(snippet(self.writer.notice(sentence, retract=True), "notice"))
                 continue
-
-            # 2. EDIT (Factual corruption backed by original fact in evidence)
-            elif r < (self.drop_prob + self.edit_prob):
-                # Randomly attempt entity or number mutation
-                mut = None
-                if self.rng.random() < 0.5:
-                    mut = self.entity_mutator.mutate(sent_clean) or self.number_mutator.mutate(sent_clean)
-                else:
-                    mut = self.number_mutator.mutate(sent_clean) or self.entity_mutator.mutate(sent_clean)
-
-                if mut is not None:
-                    # The source has the outdated/mutated text
-                    source_sentences.append(mut.mutated_text)
-                    labels.append(SentenceLabel(label="EDIT", stale_spans=mut.stale_spans, target=sent_clean))
-                    # Evidence gives the true original fact
-                    evidence.append(
-                        EvidenceSnippet(
-                            title="Reference Fact Sheet",
-                            text=f"Verified records document: {sent_clean}",
-                        )
-                    )
+            if r < drop_prob + edit_prob:
+                edit = self._edit(sentence, article)
+                if edit is not None:
+                    mutated, spans, focus = edit
+                    source_sentences.append(mutated)
+                    labels.append(SentenceLabel("EDIT", spans, sentence))
+                    required.append(snippet(self.writer.support(sentence, focus), "support"))
                     continue
 
-            # 3. KEEP (Unchanged, 0 noise)
-            source_sentences.append(sent_clean)
-            labels.append(SentenceLabel(label="KEEP", stale_spans=[], target=sent_clean))
+            source_sentences.append(sentence)
+            labels.append(SentenceLabel("KEEP", [], sentence))
+            if self.rng.random() < self.P_SUPPORT:
+                optional.append(snippet(self.writer.support(sentence), "support"))
+            elif self.rng.random() < self.P_DECOY:
+                optional.append(snippet(self.writer.notice(sentence, retract=False), "notice"))
 
-        # Ensure at least one evidence snippet exists
-        if not evidence:
-            evidence.append(
-                EvidenceSnippet(
-                    title="General Reference Document",
-                    text="Archival overview covering confirmed historical background.",
-                )
-            )
+        for _ in range(self.rng.choice(self.DISTRACTORS)):
+            other = self.rng.choice(self.seeds)
+            if other is not base_sentences:
+                optional.append(snippet(self.writer.support(self.rng.choice(other)), "support", other))
 
-        target_sentences = [lbl.target for lbl in labels if lbl.label != "DROP"]
+        self.rng.shuffle(optional)
+        while optional and sum(len(s["title"]) + len(s["text"]) for s in required + optional) > self.EVIDENCE_CHARS:
+            optional.pop()
+        snippets = required + optional
+        self.rng.shuffle(snippets)
+        merged = []
+        for s in snippets:
+            if (merged and s["kind"] == merged[-1]["kind"] == "support" and s["about"] is merged[-1]["about"]
+                    and self.rng.random() < self.P_MERGE):
+                merged[-1] = {**merged[-1], "text": f"{merged[-1]['text']} {s['text']}", "kind": "merged"}
+            else:
+                merged.append(s)
+        if not merged:
+            other = self.rng.choice(self.seeds)
+            merged.append(snippet(self.writer.support(self.rng.choice(other)), "support", other))
+        evidence = [EvidenceSnippet(s["title"], s["text"]) for s in merged]
 
         cascades = []
         if cascade_pair:
             cascades.append({"direct": cascade_pair.direct_sentence_idx,
                              "cascade": cascade_pair.cascade_sentence_idx})
-
         return SyntheticRecord(
             id=record_id,
             evidence=evidence,
             source_sentences=source_sentences,
             labels=labels,
-            target_sentences=target_sentences,
+            target_sentences=[l.target for l in labels if l.label != "DROP"],
             cascades=cascades,
         )
 
@@ -236,8 +277,8 @@ class SyntheticGenerator:
             if not order:
                 order = list(range(len(self.seeds)))
                 self.rng.shuffle(order)
-            rec_id = f"{prefix}{i:06d}"
-            records.append(self.generate_one(rec_id, base_sentences=self.seeds[order.pop()]))
+            index = order.pop()
+            records.append(self.generate_one(f"{prefix}{i:06d}", self.seeds[index], index))
         return records
 
 
@@ -266,8 +307,8 @@ def load_seeds_from_file(path: str | Path) -> list[list[str]]:
                 line = line.strip()
                 if line:
                     data = json.loads(line)
-                    # A synthetic record's gold article is its target_sentences;
-                    # its source sentences hold the injected errors.
+                    # A synthetic record's gold article is its target_sentences.
+                    # Its source sentences hold the injected errors.
                     target = data.get("target_sentences", [])
                     sents = target if target and isinstance(target[0], str) else data.get("source_sentences", [])
                     if len(sents) >= 2:
@@ -350,66 +391,48 @@ def main():
     parser.add_argument("--hf-config", type=str, default="20231101.en", help="Hugging Face dataset config")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--prefix", type=str, default="synthetic-", help="prefix of the record ids")
-    parser.add_argument("--edit-prob", type=float, default=0.35, help="probability of EDIT per sentence")
-    parser.add_argument("--drop-prob", type=float, default=0.10, help="probability of DROP per sentence")
+    parser.add_argument("--edit-prob", type=float, default=0.35, help="mean probability of EDIT per sentence")
+    parser.add_argument("--drop-prob", type=float, default=0.10, help="mean probability of DROP per sentence")
     parser.add_argument("--cascade-prob", type=float, default=0.25, help="probability of cascade injection")
     args = parser.parse_args()
 
-    # Automatically set seed-source to file if seed-file is passed
     if args.seed_file:
         args.seed_source = "file"
+    seeds = None
+    if args.seed_source == "file":
+        seeds = load_seeds_from_file(args.seed_file)
+        print(f"Loaded {len(seeds)} seed articles from {args.seed_file}")
+    elif args.seed_source == "hf-wikipedia":
+        seeds = list(stream_hf_wikipedia(args.n, dataset_name=args.hf_dataset, config=args.hf_config))
+        print(f"Streamed {len(seeds)} seed articles from {args.hf_dataset}")
 
+    print("Indexing the entities of the seed articles...")
     generator = SyntheticGenerator(
+        seeds=seeds,
         seed=args.seed,
         edit_prob=args.edit_prob,
         drop_prob=args.drop_prob,
         cascade_prob=args.cascade_prob,
     )
-
+    print(f"Generating {args.n} synthetic records with seed {args.seed}...")
+    records = generator.generate_dataset(args.n, prefix=args.prefix)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(records, args.out)
+
     label_counts = {"KEEP": 0, "EDIT": 0, "DROP": 0}
+    total_sentences = sum(len(r.source_sentences) for r in records)
     total_stale_spans = 0
-    total_sentences = 0
-    record_count = 0
-
-    if args.seed_source == "hf-wikipedia":
-        print(f"Generating {args.n} synthetic records from streamed Hugging Face Wikipedia articles...")
-        with open(args.out, "w", encoding="utf-8") as f_out:
-            for article_sents in stream_hf_wikipedia(args.n, dataset_name=args.hf_dataset, config=args.hf_config):
-                rec_id = f"{args.prefix}{record_count:06d}"
-                rec = generator.generate_one(rec_id, base_sentences=article_sents)
-                f_out.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
-
-                total_sentences += len(rec.source_sentences)
-                for lbl in rec.labels:
-                    label_counts[lbl.label] += 1
-                    total_stale_spans += len(lbl.stale_spans)
-                record_count += 1
-                if record_count % 1000 == 0:
-                    print(f"  Progress: generated {record_count} / {args.n} records...")
-    else:
-        seeds = None
-        if args.seed_source == "file" and args.seed_file:
-            seeds = load_seeds_from_file(args.seed_file)
-            print(f"Loaded {len(seeds)} seed articles from {args.seed_file}")
-            generator.seeds = seeds
-
-        print(f"Generating {args.n} synthetic records with seed {args.seed}...")
-        records = generator.generate_dataset(args.n, prefix=args.prefix)
-        write_jsonl(records, args.out)
-        record_count = len(records)
-        total_sentences = sum(len(r.source_sentences) for r in records)
-        for r in records:
-            for lbl in r.labels:
-                label_counts[lbl.label] += 1
-                total_stale_spans += len(lbl.stale_spans)
-
-    print(f"Saved {record_count} records to {args.out}")
+    for r in records:
+        for lbl in r.labels:
+            label_counts[lbl.label] += 1
+            total_stale_spans += len(lbl.stale_spans)
+    print(f"Saved {len(records)} records to {args.out}")
     print(f"Total sentences: {total_sentences}")
     if total_sentences > 0:
         for k, v in label_counts.items():
             print(f"  {k}: {v} ({v / total_sentences:.1%})")
     print(f"Total stale spans generated: {total_stale_spans}")
+    print(f"Records with a cascade link: {sum(bool(r.cascades) for r in records)}")
 
 
 if __name__ == "__main__":
