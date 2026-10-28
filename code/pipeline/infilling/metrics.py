@@ -18,8 +18,12 @@ normalization (infilling.faithfulness.updated).
                 extractor M of infilling.entities run on each sentence.
                 precision |O & G| / |O|, recall |O & G| / |G|.
     unsupported
-                The count of mentions in O that occur as a whole-word string
-                in neither the text of A nor the text of E. Lower is better.
+                The count of mentions in O that are neither mentions of A or
+                E (M run on each source sentence and each snippet) nor
+                whole-word strings of their text. Lower is better. The mention
+                test covers digit strings inside words, such as the "3" of
+                "3rd", and the string test covers mentions that M cuts
+                differently in the two texts.
     faithfulness
                 AlignScore of U(Â) against E, read from <system>/alignscore.jsonl,
                 which infilling.faithfulness writes in its own environment.
@@ -56,7 +60,7 @@ The token-level detection metrics of Section 9.2 come from classifier.train
 and staleness.train with --eval.
 
 Usage:
-    python -m infilling.metrics ../datasets/collated/train.jsonl \\
+    python -m infilling.metrics ../datasets/synthetic/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev \\
         --pairs oracle:copy oracle:noev --out runs/metrics.json
 """
@@ -120,20 +124,27 @@ def rouge(scorer, output, gold):
     return {k: (result[k].fmeasure if result else 0.0, 1) for k in ROUGE}
 
 
+def gold_rewrite(record, j):
+    """The gold rewrite of source sentence j, or None for a deleted sentence."""
+    entry = record["labels"][j]
+    return entry["target"] if entry["label"] != "DROP" else None
+
+
 def article_metrics(m, scorer, record, output, faithfulness, cascades, flagged):
     """Numerator and denominator of every metric for one system on one article."""
     source = [s.strip() for s in record["source_sentences"]]
     in_source = {norm(s) for s in source}
-    targets = [t["text"] for t in record["target_sentences"]]
+    targets = record["target_sentences"]
     out_u, gold_u = updated(output, in_source), updated(targets, in_source)
     values = rouge(scorer, out_u, gold_u)
 
     o, g = mentions(m, out_u), mentions(m, gold_u)
     values["entity_precision"] = (len(o & g), len(o))
     values["entity_recall"] = (len(o & g), len(g))
-    source_text = " ".join(source).lower()
-    evidence_text = "\n".join(f"{s['title']}: {s['text']}" for s in record["evidence"]).lower()
-    values["unsupported"] = (sum(not occurs(x, source_text) and not occurs(x, evidence_text) for x in o), 1)
+    snippets = [f"{s['title']}: {s['text']}" for s in record["evidence"]]
+    known = mentions(m, source) | mentions(m, snippets)
+    text = "\n".join(source + snippets).lower()
+    values["unsupported"] = (sum(x not in known and not occurs(x, text) for x in o), 1)
     values["faithfulness"] = (faithfulness, 1) if faithfulness is not None and out_u else (0.0, 0)
 
     a, b = words(" ".join(source)), words(" ".join(s.strip() for s in output if s.strip()))
@@ -145,8 +156,7 @@ def article_metrics(m, scorer, record, output, faithfulness, cascades, flagged):
     if cascades is not None:
         idx = [c["sentence_idx"] for c in cascades]
         if len(output) == len(source):
-            gold = [targets[record["labels"][j]["target_idx"]] for j in idx
-                    if record["labels"][j]["target_idx"] is not None]
+            gold = [g for g in (gold_rewrite(record, j) for j in idx) if g is not None]
             cascade = rouge(scorer, updated([output[j] for j in idx], in_source), updated(gold, in_source))
             values.update({f"cascade_{k}": v for k, v in cascade.items()})
         for group, shared in (("shared", True), ("unshared", False)):
@@ -194,7 +204,7 @@ def collect(data, run_dirs, m, cascade_path=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("data", help="the collated split the runs read")
+    parser.add_argument("data", help="the dataset split the runs read")
     parser.add_argument("runs", nargs="+", help="name=run_dir")
     parser.add_argument("--cascades", help="hand-labelled cascade JSONL of Section 8.5")
     parser.add_argument("--pairs", nargs="*", default=[], help="A:B, where copy is the unchanged article")

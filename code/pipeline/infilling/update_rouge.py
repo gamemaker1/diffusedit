@@ -9,18 +9,18 @@ skipped, and an empty U(output) scores 0.
 
 Two gold sides are reported.
 
-    full    every gold sentence absent from the source, including sentences
-            the revision added. The pipeline never adds sentences, so this
-            caps what it can reach.
-    edits   only gold sentences aligned to a source EDIT sentence, the part of
-            the update the pipeline attempts
+    full    every gold sentence absent from the source
+    edits   only the gold rewrites of source EDIT sentences
+
+A synthetic gold article adds no sentence, so the two sides differ only when
+an EDIT rewrite repeats a sentence of the source.
 
 "copy", the unchanged article, has an empty U(output) and scores 0 by
 construction. The paired tests of infilling.significance compare runs with the
 article as the unit.
 
 Usage:
-    python -m infilling.update_rouge ../datasets/collated/train.jsonl \\
+    python -m infilling.update_rouge ../datasets/synthetic/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev predicted=runs/fix-predicted \\
         --pairs oracle:noev oracle:predicted
 """
@@ -66,10 +66,9 @@ def main():
     for article_id in ids:
         record = records[article_id]
         source = {norm(s) for s in record["source_sentences"]}
-        targets = [t["text"] for t in record["target_sentences"]]
-        edit_targets = {lab["target_idx"] for lab in record["labels"] if lab["label"] == "EDIT"}
-        gold = {"full": [t for t in targets if norm(t) not in source],
-                "edits": [t for j, t in enumerate(targets) if j in edit_targets and norm(t) not in source]}
+        edits = [lab["target"] for lab in record["labels"] if lab["label"] == "EDIT"]
+        gold = {"full": [t for t in record["target_sentences"] if norm(t) not in source],
+                "edits": [t for t in edits if norm(t) not in source]}
         for side, gold_sentences in gold.items():
             if not gold_sentences:
                 continue

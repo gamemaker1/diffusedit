@@ -10,12 +10,13 @@ carry the facts without revealing the answer through their form.
 
 Each line of a task file `in/chunk_NNNN.jsonl` is one article:
 
-    {"id": "...", "sentences": [{"i": 0, "label": "KEEP|EDIT|DROP", "text": "...", "fixes": [...]}]}
+    {"id": "...", "sentences": [{"i": 0, "label": "KEEP|EDIT|DROP|CASCADE", "text": "...", "fixes": [...]}]}
 
-- `text` is the correct sentence for KEEP and EDIT, and the sentence that is
-  no longer valid for DROP.
-- EDIT sentences have `fixes`, a list of `{"wrong": ..., "right": ...}`. The
-  outdated article holds `wrong` where `text` holds `right`.
+- `text` is the correct sentence for KEEP, EDIT and CASCADE, and the sentence
+  that is no longer valid for DROP.
+- EDIT and CASCADE sentences have `fixes`, a list of `{"wrong": ..., "right": ...}`.
+  The outdated article holds `wrong` where `text` holds `right`.
+- CASCADE sentences also have `avoid`, a list of strings.
 
 ## Output
 
@@ -56,6 +57,12 @@ KEEP. For about half of the KEEP sentences, write a passage that is consistent
 with the sentence and names its main subject, and list the sentence in
 `about`. Leave the other half without a passage. Never contradict a KEEP
 sentence.
+
+CASCADE. The sentence is wrong only as a consequence of an EDIT sentence of
+the same article. Write no passage about it and never list it in `about`. No
+passage may contain one of its `wrong` strings or one of its `avoid` strings.
+Do not state its fact in other words either. A reader must be able to fix it
+only by reasoning from the corrected EDIT sentence.
 
 Background. In about one article in three, add one passage on the same topic
 that bears on no sentence (`about: []`).

@@ -41,7 +41,7 @@ python3 -m code.synthetic.generate \
 python3 -m code.synthetic.generate \
     --seed-file audit/train_audit.tsv \
     --n 1000 \
-    --out datasets/synthetic/train.jsonl
+    --out datasets/synthetic/generated.jsonl
 ```
 
 Key parameters:
@@ -57,18 +57,18 @@ Key parameters:
 ### 2. Validate Generated Records
 Run the integrity validator:
 ```bash
-python3 -m code.synthetic.validate datasets/synthetic/train.jsonl
+python3 -m code.synthetic.validate datasets/synthetic/generated.jsonl
 ```
 To run full tokenization checks against LLaDA tokenizer:
 ```bash
-python3 -m code.synthetic.validate datasets/synthetic/train.jsonl --check-tokens
+python3 -m code.synthetic.validate datasets/synthetic/generated.jsonl --check-tokens
 ```
 
 ### 3. Downstream Feature Extraction & Training
 Directly extract features using the existing pipeline:
 ```bash
 cd code/pipeline
-python3 -m classifier.extract ../../datasets/synthetic/train.jsonl ../../features/synthetic_train
+python3 -m classifier.extract ../../datasets/synthetic/generated.jsonl ../../features/synthetic_train
 python3 -m classifier.train --train ../../features/synthetic_train --layer 32 --out ../../heads/synthetic_sentence
 python3 -m staleness.train --train ../../features/synthetic_train --val ../../features/synthetic_val --out ../../heads/synthetic_staleness
 ```

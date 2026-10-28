@@ -13,11 +13,8 @@ exactly the "let the model learn" approach the team discussed.
 Needs experiments.evidence_extract's output in addition to
 classifier.extract's normal output (same articles, same order, same split).
 
-CAVEAT: the team's audit (audit/noise.json) estimates ~40-60% label noise
-per class in the training data. If this doesn't beat classifier.train's
-numbers, that is NOT strong evidence evidence-augmentation doesn't help --
-label noise may be swamping any real signal either way. Compare against
-classifier.train run on the SAME split for an apples-to-apples number.
+Compare against classifier.train run on the SAME split for an apples-to-apples
+number.
 
 --evidence-pool chooses how an article's snippets become one vector.
 

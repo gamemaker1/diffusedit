@@ -17,7 +17,7 @@ independent. For a pair (A, B) the statistic is metric(A) - metric(B).
     p_holm   Holm correction over every test of one subset table
 
 Usage:
-    python -m infilling.significance ../datasets/collated/train.jsonl \\
+    python -m infilling.significance ../datasets/synthetic/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev predicted=runs/fix-predicted \\
         --pairs oracle:copy oracle:noev predicted:copy oracle:predicted noev:copy
 """
@@ -90,7 +90,7 @@ def collect(data, run_dirs):
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
         repaired = sorted({edit["sentence"] for r in runs.values() for edit in r[article_id]["edits"]})
         for j in repaired:
-            target = gold(record, j, "target")
+            target = gold(record, j)
             source = record["source_sentences"][j].strip()
             g, s = m(target), m(source)
             new_words = words(target) - words(source)
