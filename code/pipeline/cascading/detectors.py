@@ -299,7 +299,7 @@ class ConsequenceDetector:
                 u_k_batch = H_before[candidates]              # [n_cands, d] outdated versions
                 # Broadcast u_j across candidates
                 u_j_exp = u_j.expand(len(candidates), -1)
-                scores = self.head(u_j_exp, u_k_batch).squeeze(-1)  # [n_cands]
+                scores = self.head(u_j_exp, u_k_batch).squeeze(-1).sigmoid()  # [n_cands], g_jk
                 for idx, k in enumerate(candidates):
                     if scores[idx].item() >= self.tau_c:
                         flagged.add(k)

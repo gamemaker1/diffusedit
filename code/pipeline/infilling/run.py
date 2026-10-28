@@ -51,8 +51,8 @@ from infilling.spans import Article, oracle_spans, policy_spans, snap, word_star
 C_MAX = 3
 
 
-def parse():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def arguments(parser):
+    """The flags of one round, shared with infilling.loop."""
     parser.add_argument("data")
     parser.add_argument("out")
     parser.add_argument("--model", default=MODEL)
@@ -83,13 +83,22 @@ def parse():
     parser.add_argument("--ids", help="JSON list of article ids to keep, such as staleness.train's heldout_ids.json")
     parser.add_argument("--limit", type=int, help="first N articles, after --sample or --ids")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+
+
+def check(parser, args):
     if args.masks == "predicted" and not args.staleness_head:
         parser.error("--masks predicted needs --staleness-head")
     if args.ids and args.sample:
         parser.error("--ids and --sample both choose the articles, pass one")
     if args.scorer == "verifier" and not args.evidence:
         parser.error("--scorer verifier has nothing to verify against with --no-evidence")
+
+
+def parse():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    arguments(parser)
+    args = parser.parse_args()
+    check(parser, args)
     return args
 
 
