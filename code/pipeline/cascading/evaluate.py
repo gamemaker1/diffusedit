@@ -96,6 +96,8 @@ def build(args, device):
         return StalenessDeltaDetector(head, mean, std, tau2=args.tau2), ckpt["layer"], None
     if args.detector == "consequence":
         head, config = load_consequence_head(args.cascade_head, device=device)
+        if args.tau_c is None:
+            args.tau_c = config.get("tau_c", 0.5)
         return ConsequenceDetector(head.cpu(), tau_c=args.tau_c), config["layer"], None
     head, mean, std, ckpt = linear_head(args.classifier_head, "cpu")
     return EditedAsEvidenceDetector(), ckpt["layer"], (head, mean, std)
@@ -119,7 +121,7 @@ def main():
     parser.add_argument("--classifier-head", help="head.pt of classifier.train")
     parser.add_argument("--staleness-head", help="head.pt of staleness.train")
     parser.add_argument("--tau2", type=float, default=0.5, help="staleness delta threshold")
-    parser.add_argument("--tau-c", type=float, default=0.5, help="consequence threshold")
+    parser.add_argument("--tau-c", type=float, help="consequence threshold; default the head's tuned tau_c")
     parser.add_argument("--out", required=True, help="output JSON path")
     args = parser.parse_args()
     missing = [f"--{n.replace('_', '-')}" for n in NEEDS.get(args.detector, ()) if not getattr(args, n)]

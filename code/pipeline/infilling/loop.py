@@ -10,7 +10,9 @@ deleted, and a DROP that does not clear it becomes EDIT. Then, for up to
        their remask budget C_max, and repaired left to right by
        infilling.repair. Delta_r is the set of repaired and deleted sentences.
     2. The article is encoded again (H after the round).
-    3. The cascade detector flags sentences outside Delta_r. The classifier,
+    3. The cascade detector flags sentences outside Delta_r. Staleness delta
+       compares the masking head's token scores before and after the round.
+       The classifier,
        under the new states, deletes a flagged sentence whose DROP
        probability clears tau_d. The other flagged sentences form the EDIT
        set of the next round.
@@ -123,11 +125,18 @@ def set_evidence(article, tok, evidence):
 
 
 def build_detector(args, device):
-    """The cascade detector and the layer of the pooled states it reads."""
+    """The cascade detector and the layer of the pooled states it reads.
+
+    Staleness delta re-scores tokens with the masking head (Eq. 7), so it
+    reads token scores, not pooled states.
+    """
     if args.detector == "none":
         return None, None
+    if args.detector == "staleness_delta":
+        from cascading.detectors import StalenessDeltaDetector
+        return StalenessDeltaDetector(tau2=args.tau2), None
     from cascading.evaluate import build
-    ns = SimpleNamespace(detector=args.detector, staleness_head=args.delta_head, tau2=args.tau2,
+    ns = SimpleNamespace(detector=args.detector, staleness_head=None, tau2=args.tau2,
                          cascade_head=args.cascade_head, tau_c=args.tau_c, classifier_head=args.classifier_head)
     detector, layer, _ = build(ns, device)
     return detector, layer
@@ -144,14 +153,11 @@ def main():
     parser.add_argument("--rounds", type=int, default=3, help="round cap R")
     parser.add_argument("--detector", choices=DETECTORS, default="staleness_delta")
     parser.add_argument("--cascade-head", help="directory of cascading.train, for --detector consequence")
-    parser.add_argument("--delta-head", help="linear head.pt of staleness.train for --detector staleness_delta; "
-                                             "default --staleness-head")
     parser.add_argument("--tau2", type=float, default=0.5, help="staleness delta threshold")
-    parser.add_argument("--tau-c", type=float, default=0.5, help="consequence threshold")
+    parser.add_argument("--tau-c", type=float, help="consequence threshold; default the head's tuned tau_c")
     args = parser.parse_args()
     check(parser, args)
-    args.delta_head = args.delta_head or args.staleness_head
-    needs = {"consequence": "cascade_head", "staleness_delta": "delta_head", "edited_as_evidence": "classifier_head"}
+    needs = {"consequence": "cascade_head", "staleness_delta": "staleness_head", "edited_as_evidence": "classifier_head"}
     if args.detector in needs and not getattr(args, needs[args.detector]):
         parser.error(f"--detector {args.detector} needs --{needs[args.detector].replace('_', '-')}")
     if args.labels == "predicted" and not args.classifier_head:
@@ -215,6 +221,15 @@ def main():
             def text(j):
                 return tok.decode(article.sentences[j].tolist()).strip()
 
+            def token_scores(states, spans, ev_range):
+                """The staleness head's score of every token, one array per sentence, or None."""
+                if head is None:
+                    return None
+                view = SimpleNamespace(spans=spans, evidence_spans=[ev_range] if ev_range else [])
+                with torch.inference_mode():
+                    pi = head(states[stale_layer], view).cpu().numpy()
+                return [pi[a:b] for a, b in spans]
+
             def classify(states):
                 if args.labels == "oracle":
                     return None, np.asarray(gold)
@@ -237,12 +252,7 @@ def main():
                     states = encode_layers(model, article, layers)
                 dirty = False
                 spans_now = sentence_spans(article)
-                scores = None
-                if head is not None:
-                    view = SimpleNamespace(spans=spans_now, evidence_spans=[ev_range] if ev_range else [])
-                    with torch.inference_mode():
-                        pi = head(states[stale_layer], view).cpu().numpy()
-                    scores = [pi[a:b] for a, b in spans_now]
+                scores = token_scores(states, spans_now, ev_range)
                 previous = [text(j) for j in range(n)]
                 before = {layer: pool(states[layer], spans_now) for layer in layers}
                 repaired = []
@@ -286,6 +296,9 @@ def main():
                 if detector_layer:
                     inputs["pooled_before"] = before[detector_layer].cpu().numpy()
                     inputs["pooled_after"] = pool(states[detector_layer], spans_after).cpu().numpy()
+                if args.detector == "staleness_delta":
+                    inputs["token_scores_before"] = scores
+                    inputs["token_scores_after"] = token_scores(states, spans_after, ev_range)
                 probs, labels = classify(states)
                 if probs is not None:
                     inputs["classifier_probs"] = probs

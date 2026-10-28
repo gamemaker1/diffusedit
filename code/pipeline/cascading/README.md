@@ -8,12 +8,12 @@ A cascading edit is a sentence that the evidence does not contradict but that de
 
 | Detector | Class | Inputs | Training |
 |---|---|---|---|
-| Mention overlap | `MentionOverlapDetector` | sentences before and after the round | none |
-| Edited as evidence | `EditedAsEvidenceDetector` | classifier head over the evidence with the repairs appended | none |
-| Staleness delta | `StalenessDeltaDetector` | staleness head over the hidden states before and after the round | none |
-| Consequence prediction | `ConsequenceDetector` | consequence head over u_j (corrected) and u_k (outdated) | `cascading.train` |
+| (a) Mention overlap | `MentionOverlapDetector` | sentences before and after the round | none |
+| (b) Staleness delta | `StalenessDeltaDetector` | staleness head over the hidden states before and after the round | none |
+| (c) Consequence prediction | `ConsequenceDetector` | consequence head over u_j (corrected) and u_k (outdated) | `cascading.train` |
+| (d) Edited as evidence | `EditedAsEvidenceDetector` | classifier head over the evidence with the repairs added | none |
 
-Mention overlap flags a sentence that shares a named entity or digit string with either version of a repaired sentence, so it cannot reach a cascade without a shared mention. Staleness delta flags a sentence that enters the top tenth of staleness scores after the round, was not there before, and scores at least `tau2`. Consequence prediction flags `s_k` when `g_jk >= tau_c` for some repaired `s_j`.
+The letters (a) to (c) are the paper's, and edited as evidence, from the progress report, is (d). Mention overlap flags a sentence that shares a named entity or digit string with either version of a repaired sentence, so it cannot reach a cascade without a shared mention. Staleness delta flags a sentence with a token that enters the top tenth of the article's token scores after the round, was not there before, and scores at least `tau2`. In `infilling.loop` it re-scores every token with the masking head. The offline evaluation has no token states for every sentence and applies the same rule to one score per sentence from its pooled vector. Consequence prediction flags `s_k` when `g_jk >= tau_c` for some repaired `s_j`, with `tau_c` tuned for F1 on the validation pairs by default. Edited as evidence puts the repaired sentences before the other snippets, so the evidence token budget never cuts them.
 
 ## Data
 

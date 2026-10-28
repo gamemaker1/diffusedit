@@ -10,10 +10,14 @@ where:
   - MLP has one hidden layer of width 512
 
 Training:
+  - Inputs are standardized with the moments of the training vectors, which
+    the head stores as buffers, so callers pass raw pooled states
   - Positive pairs: the cascade links of cascading.links (direct edit ↔ cascade edit)
   - Negative pairs: same direct edit + KEEP sentences (3 negatives per positive)
   - Loss: binary cross-entropy
   - Optimizer: AdamW(lr=1e-3, wd=1e-2), batch 512, early stop on val AUROC
+  - tau_c is the threshold with the best F1 on the validation pairs, saved
+    in config.json, the default of the consequence detector
 
 u_j comes from --features-after, the features of the oracle-repaired view
 (cascading.views), so that the direct edit enters in its corrected version.
@@ -53,6 +57,9 @@ class ConsequenceHead(nn.Module):
         super().__init__()
         self.d = d
         self.hidden = hidden
+        # Standardization with the moments of the training vectors, saved with the head.
+        self.register_buffer("mean", torch.zeros(d))
+        self.register_buffer("std", torch.ones(d))
         self.mlp = nn.Sequential(
             nn.Linear(4 * d, hidden),
             nn.ReLU(),
@@ -67,6 +74,7 @@ class ConsequenceHead(nn.Module):
         Returns:
             [B, 1] raw logit (apply sigmoid for probability)
         """
+        u_j, u_k = (u_j - self.mean) / self.std, (u_k - self.mean) / self.std
         feat = torch.cat([u_j, u_k, u_j * u_k, (u_j - u_k).abs()], dim=-1)
         return self.mlp(feat)
 
@@ -101,7 +109,7 @@ def load_features(directory: str | Path, layer: int | None = None) -> tuple[np.n
     return features, article, labels
 
 
-def load_pairs(pairs_path: str | Path) -> tuple[list[dict], list[dict], list[int]]:
+def load_pairs(pairs_path: str | Path) -> list[dict]:
     """Load cascade pairs from cascading.links output.
 
     Each line: {"article_id", "j", "k", "label": 0|1}
@@ -190,6 +198,20 @@ def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
     return float((ranks[labels == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
+def best_threshold(scores: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+    """The threshold of a 0.05 grid with the highest F1 on (scores, labels), and that F1."""
+    best = (0.5, -1.0)
+    for tau in np.round(np.arange(0.05, 0.951, 0.05), 2):
+        pred = scores >= tau
+        tp = int((pred & (labels == 1)).sum())
+        p = tp / max(int(pred.sum()), 1)
+        r = tp / max(int((labels == 1).sum()), 1)
+        f1 = 2 * p * r / (p + r) if p + r else 0.0
+        if f1 > best[1]:
+            best = (float(tau), f1)
+    return best
+
+
 def train(
     head: ConsequenceHead,
     train_u_j: torch.Tensor,
@@ -266,9 +288,13 @@ def train(
                 print(f"  Early stop at epoch {epoch} (best val AUROC {best_auroc:.4f})")
                 break
 
-    if best_state is not None:
-        head.load_state_dict(best_state)
-    return {"best_val_auroc": best_auroc, "history": history}
+    head.load_state_dict(best_state)
+    head.eval()
+    with torch.inference_mode():
+        val_scores = torch.sigmoid(head(val_u_j.to(device), val_u_k.to(device)).squeeze(-1)).cpu().numpy()
+    tau_c, val_f1 = best_threshold(val_scores, val_y.numpy())
+    print(f"  tau_c {tau_c}  val F1 {val_f1:.4f}")
+    return {"best_val_auroc": best_auroc, "tau_c": tau_c, "val_f1": val_f1, "history": history}
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +357,12 @@ def main():
     train_uj, train_uk, train_y = pairs_to_tensors(train_pairs, features, features_after)
     val_uj,   val_uk,   val_y   = pairs_to_tensors(val_pairs, features, features_after)
 
+    if len(set(val_y.tolist())) < 2 or len(set(train_y.tolist())) < 2:
+        raise SystemExit("the train or validation pairs hold a single class; AUROC and early stopping need both")
     head = ConsequenceHead(d=d, hidden=args.hidden)
+    both = torch.cat([train_uj, train_uk])
+    head.mean.copy_(both.mean(0))
+    head.std.copy_(both.std(0).clamp_min(1e-6))
     print(f"\nTraining ConsequenceHead  d={d}  hidden={args.hidden}  device={device}")
     metrics = train(
         head, train_uj, train_uk, train_y, val_uj, val_uk, val_y,

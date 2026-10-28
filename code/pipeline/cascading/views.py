@@ -8,7 +8,7 @@ record go to classifier.extract.
     after     the source article with every direct EDIT replaced by its gold
               rewrite. A direct DROP keeps its source text, because an empty
               sentence has no tokens and its row would be undefined.
-    evidence  the after view with the rewritten sentences appended to the
+    evidence  the after view with the rewritten sentences added to the
               evidence as snippets (EditedAsEvidenceDetector.augment_evidence),
               the input of the edited-as-evidence detector in round 2.
 

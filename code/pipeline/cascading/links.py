@@ -7,12 +7,19 @@ its EDIT and DROP sentences that are not the cascade of a link. A record
 without links has no cascades, and all its EDIT and DROP sentences are
 direct edits.
 
+A link whose cascade fix (the correct strings of k that the fix of j does
+not contain) also occurs in another sentence of the outdated article is left
+out of both files, because the article itself states the fix. Generators
+before that rule produced about 13% such links.
+
 A seeded fraction of the articles with a link becomes the evaluation set and
 the rest give training pairs, so no article is in both. With --heads-holdout,
 the evaluation set is instead the linked articles among those that
 classifier.train and staleness.train hold out with the same fraction and seed
 (classifier.train.split_by_article over the file order), so the loop and the
-detectors are scored on articles no head was fitted on.
+detectors are scored on articles no head was fitted on. The heads still used
+those articles for early stopping and for tuning tau_d and tau, so the scores
+are development numbers, and final numbers come from the test split.
 
     labels.jsonl  the format of cascading.evaluate, one line per evaluation
                   article, with its direct edits and its cascade sentences.
@@ -31,6 +38,7 @@ Usage:
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 
 from cascading.mentions import get_extractor
@@ -43,6 +51,32 @@ def target(record, i):
     """The gold rewrite of source sentence i, or "" for a deleted sentence."""
     entry = record["labels"][i]
     return entry["target"] if entry["label"] != "DROP" else ""
+
+
+def fixes(record, i):
+    """(wrong, right) strings of each stale span of sentence i: the target text between unchanged neighbours."""
+    source, entry = record["source_sentences"][i], record["labels"][i]
+    target, spans = entry["target"], entry["stale_spans"]
+    out, pos_s, pos_t = [], 0, 0
+    for n, (a, b) in enumerate(spans):
+        pos_t += a - pos_s
+        after = source[b:spans[n + 1][0]] if n + 1 < len(spans) else source[b:]
+        end = len(target) - len(after) if n + 1 == len(spans) else target.index(after, pos_t) if after else pos_t
+        out.append((source[a:b], target[pos_t:end]))
+        pos_s, pos_t = b, end
+    return out
+
+
+def whole(word, text):
+    return re.search(rf"(?<!\w){re.escape(word.lower())}(?!\w)", text.lower()) is not None
+
+
+def fix_in_article(record, link):
+    """True when a fix string of the cascade, absent from the direct fix, occurs in another sentence."""
+    j, k = link["direct"], link["cascade"]
+    direct_fix = " ".join(right for _, right in fixes(record, j))
+    others = " ".join(s for i, s in enumerate(record["source_sentences"]) if i != k)
+    return any(whole(right, others) for _, right in fixes(record, k) if not whole(right, direct_fix))
 
 
 def direct(record):
@@ -86,6 +120,12 @@ def main():
     args = parser.parse_args()
 
     records = list(read_jsonl(args.data))
+    excluded = 0
+    for record in records:
+        links = record.get("cascades", [])
+        record["cascades"] = [link for link in links if not fix_in_article(record, link)]
+        excluded += len(links) - len(record["cascades"])
+    print(f"{excluded} links left out because the outdated article states the cascade fix elsewhere")
     rng = random.Random(args.seed)
     if args.heads_holdout:
         import numpy as np
