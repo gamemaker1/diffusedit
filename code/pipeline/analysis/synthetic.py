@@ -91,7 +91,7 @@ def data_stats(path, sample, seed=42):
             if entry["label"] != "EDIT":
                 continue
             shares.append(sum(b - a for a, b in entry["stale_spans"]) / max(len(source), 1))
-            new = words(gold(record, j, "target")) - words(source)
+            new = words(gold(record, j)) - words(source)
             with_new += bool(new)
             supported += bool(new) and new <= evidence | words(source)
     total = sum(labels.values())

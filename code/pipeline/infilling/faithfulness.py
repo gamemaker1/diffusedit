@@ -20,7 +20,7 @@ article, with a null score when U(output) is empty. A rerun resumes after
 the last article.
 
 Usage:
-    python -m infilling.faithfulness runs/fix-oracle ../datasets/collated/train.jsonl \\
+    python -m infilling.faithfulness runs/fix-oracle ../datasets/synthetic/split/train.jsonl \\
         --ckpt checkpoints/AlignScore-large.ckpt
 """
 
@@ -44,7 +44,7 @@ def updated(sentences, source):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run")
-    parser.add_argument("data", help="the collated split the run read")
+    parser.add_argument("data", help="the dataset split the run read")
     parser.add_argument("--ckpt", required=True, help="AlignScore-large.ckpt or AlignScore-base.ckpt")
     parser.add_argument("--model", default="roberta-large", help="roberta-base for the base checkpoint")
     parser.add_argument("--mode", default="nli_sp", choices=["nli_sp", "nli", "bin_sp", "bin"])

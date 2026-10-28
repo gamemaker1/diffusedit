@@ -60,7 +60,7 @@ The token-level detection metrics of Section 9.2 come from classifier.train
 and staleness.train with --eval.
 
 Usage:
-    python -m infilling.metrics ../datasets/collated/train.jsonl \\
+    python -m infilling.metrics ../datasets/synthetic/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev \\
         --pairs oracle:copy oracle:noev --out runs/metrics.json
 """
@@ -125,20 +125,16 @@ def rouge(scorer, output, gold):
 
 
 def gold_rewrite(record, j):
-    """The gold rewrite of source sentence j in either schema, or None for a deleted sentence."""
+    """The gold rewrite of source sentence j, or None for a deleted sentence."""
     entry = record["labels"][j]
-    if "target" in entry:
-        return entry["target"] if entry["label"] != "DROP" else None
-    if entry.get("target_idx") is None:
-        return None
-    return record["target_sentences"][entry["target_idx"]]["text"]
+    return entry["target"] if entry["label"] != "DROP" else None
 
 
 def article_metrics(m, scorer, record, output, faithfulness, cascades, flagged):
     """Numerator and denominator of every metric for one system on one article."""
     source = [s.strip() for s in record["source_sentences"]]
     in_source = {norm(s) for s in source}
-    targets = [t if isinstance(t, str) else t["text"] for t in record["target_sentences"]]
+    targets = record["target_sentences"]
     out_u, gold_u = updated(output, in_source), updated(targets, in_source)
     values = rouge(scorer, out_u, gold_u)
 
@@ -208,7 +204,7 @@ def collect(data, run_dirs, m, cascade_path=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("data", help="the collated split the runs read")
+    parser.add_argument("data", help="the dataset split the runs read")
     parser.add_argument("runs", nargs="+", help="name=run_dir")
     parser.add_argument("--cascades", help="hand-labelled cascade JSONL of Section 8.5")
     parser.add_argument("--pairs", nargs="*", default=[], help="A:B, where copy is the unchanged article")

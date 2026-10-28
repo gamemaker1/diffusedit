@@ -22,7 +22,7 @@ Output directory:
     tokens/row.npy       int32 [n_tokens], the token's sentence row
 
 Usage:
-    python -m classifier.extract ../datasets/collated/train.jsonl features/train --sample 20000 --seed 42
+    python -m classifier.extract ../datasets/synthetic/split/train.jsonl features/train
 """
 
 import argparse

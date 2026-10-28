@@ -1,4 +1,4 @@
-"""Build LLaDA input sequences with sentence token spans from collated records.
+"""Build LLaDA input sequences with sentence token spans from dataset records.
 
 A sequence is [BOS] + evidence + separator + article, the E ⊕ A input of
 Algorithm 1. Each article sentence is tokenized on its own, so its token span
@@ -8,7 +8,7 @@ Every EDIT sentence also gets one stale label per token (Section 8.4). A token
 is stale when its character range overlaps a stale span of the label.
 
 Check spans and stale tokens against a split:
-    python -m classifier.inputs ../datasets/collated/train.jsonl --n 50
+    python -m classifier.inputs ../datasets/synthetic/split/train.jsonl --n 50
 """
 
 import argparse
@@ -51,8 +51,8 @@ def encode(tok, text):
 def evidence_ids(tok, evidence, budget=EVIDENCE_BUDGET):
     """Snippets as "title: text", one per line, cut at the token budget.
 
-    The collated data is already truncated to 600 LLaDA tokens without titles.
-    The cut here enforces the budget again after titles are added.
+    Evidence longer than the budget is cut at the budget, so the last
+    snippets can be partial or absent.
     """
     ids, spans = [], []
     for i, snippet in enumerate(evidence):

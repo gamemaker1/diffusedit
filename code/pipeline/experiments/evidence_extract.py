@@ -26,7 +26,7 @@ Output directory:
     progress.json         articles and rows written so far. A rerun resumes here.
 
 Usage:
-    python -m experiments.evidence_extract ../datasets/collated/train.jsonl evidence_features/train
+    python -m experiments.evidence_extract ../datasets/synthetic/split/train.jsonl evidence_features/train
 """
 
 import argparse

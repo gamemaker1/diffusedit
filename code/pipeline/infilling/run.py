@@ -1,4 +1,4 @@
-"""Run one infilling round over a collated split with one configuration.
+"""Run one infilling round over a dataset split with one configuration.
 
 Sentence labels are the derived ones (the oracle sentence labels of
 Section 9.3). DROP sentences are deleted, and every EDIT sentence is
@@ -21,11 +21,11 @@ Output directory:
                    after the last finished article.
 
 Usage:
-    python -m infilling.run ../datasets/collated/test.jsonl runs/oracle --masks oracle
-    python -m infilling.run ../datasets/collated/test.jsonl runs/oracle-noev --masks oracle --no-evidence
-    python -m infilling.run ../datasets/collated/val.jsonl runs/val-lam03 --masks predicted \
-        --staleness-head heads/staleness/head.pt --lam 0.3 --limit 200
-    python -m infilling.run ../datasets/collated/train.jsonl runs/train-heldout --masks predicted \
+    python -m infilling.run ../datasets/synthetic/split/train.jsonl runs/oracle --masks oracle \
+        --ids heads/staleness/heldout_ids.json --limit 500
+    python -m infilling.run ../datasets/synthetic/split/train.jsonl runs/oracle-noev --masks oracle --no-evidence \
+        --ids heads/staleness/heldout_ids.json --limit 500
+    python -m infilling.run ../datasets/synthetic/split/train.jsonl runs/predicted --masks predicted \
         --staleness-head heads/staleness/head.pt --ids heads/staleness/heldout_ids.json --limit 500
 """
 

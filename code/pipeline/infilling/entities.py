@@ -22,7 +22,7 @@ Subsets: sentences with G - S non-empty, and the supported sentences of
 infilling.evaluate.
 
 Usage:
-    python -m infilling.entities runs/fix-oracle ../datasets/collated/train.jsonl
+    python -m infilling.entities runs/fix-oracle ../datasets/synthetic/split/train.jsonl
 """
 
 import argparse
@@ -103,7 +103,7 @@ def main():
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
         for edit in result["edits"]:
             j = edit["sentence"]
-            target = gold(record, j, "target")
+            target = gold(record, j)
             source, output = result["source"][j], result["output"][j]
             g, s, o = m(target), m(source), m(output)
             texts = [c["text"] for d in edit["decisions"] for c in d["candidates"]]

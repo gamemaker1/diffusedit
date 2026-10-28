@@ -15,18 +15,15 @@ For every repaired sentence, with the gold rewrite as reference:
 
 Sentences whose rewrite adds no new words enter the ROUGE numbers only.
 
-Every metric is also reported on two subsets of the sentences.
-
-    supported   every new word of the gold rewrite appears in the evidence or
-                the source sentence, so the input contains the new facts
-    cited       the gold target sentence cites an evidence snippet
-                (FRUIT's evidence_refs), when the data carries the field
+Every metric is also reported on the supported sentences, those where every
+new word of the gold rewrite appears in the evidence or the source sentence,
+so the input contains the new facts.
 
 masked_fraction is the share of source characters the run masked, and
 stale_fraction the share the derived labels mark stale.
 
 Usage:
-    python -m infilling.evaluate runs/oracle ../datasets/collated/test.jsonl
+    python -m infilling.evaluate runs/oracle ../datasets/synthetic/split/train.jsonl
 """
 
 import argparse
@@ -47,14 +44,17 @@ def words(text):
     return set(re.findall(r"\w+", text.lower()))
 
 
-def gold(record, j, key):
+def gold(record, j):
+    """The gold rewrite of source sentence j, empty for a DROP sentence.
+
+    A FRUIT record, read by the figures of the earlier reports, has no target
+    field, and its rewrite is the aligned target sentence.
+    """
     entry = record["labels"][j]
-    if key not in entry and entry.get("target_idx") is not None:
-        return record["target_sentences"][entry["target_idx"]]["text"]
-    if key not in entry:
-        raise SystemExit(f"{record['id']}: label entry {j} has no {key!r}; it has {sorted(entry)}, "
-                         f"the record has {sorted(record)}. Pass --target-key")
-    return entry[key]
+    if "target" in entry:
+        return entry["target"]
+    idx = entry.get("target_idx")
+    return "" if idx is None else record["target_sentences"][idx]["text"]
 
 
 def coverage(new, text):
@@ -72,8 +72,7 @@ def summarize(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run")
-    parser.add_argument("data", help="the collated split the run read, with gold rewrites")
-    parser.add_argument("--target-key", default="target", help="gold rewrite field of a label entry")
+    parser.add_argument("data", help="the dataset split the run read, with gold rewrites")
     parser.add_argument("--limit", type=int, help="score only the first N articles of the run")
     parser.add_argument("--out", help="default <run>/metrics.json")
     args = parser.parse_args()
@@ -90,7 +89,7 @@ def main():
         stats.update(result["stats"])
         for edit in result["edits"]:
             j = edit["sentence"]
-            target = gold(record, j, args.target_key)
+            target = gold(record, j)
             source, output = result["source"][j], result["output"][j]
             entry = record["labels"][j]
             evidence = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
@@ -105,8 +104,6 @@ def main():
             if "stale_spans" in entry:
                 row["stale_fraction"] = sum(b - a for a, b in entry["stale_spans"]) / max(len(source), 1)
             row["is_supported"] = bool(new) and new <= evidence | words(source)
-            if entry.get("target_idx") is not None and "target_sentences" in record:
-                row["is_cited"] = bool(record["target_sentences"][entry["target_idx"]].get("evidence_refs"))
             if new:
                 row["hit"] = float(any(new <= words(t) for t in texts))
                 row["pool_coverage"] = max(coverage(new, t) for t in texts)
@@ -115,10 +112,9 @@ def main():
 
     metrics = summarize(rows)
     keys = [k for k in metrics if k not in ("sentences", "sentences_with_new_words")]
-    for subset in ("supported", "cited"):
-        part = [row for row in rows if row.get(f"is_{subset}")]
-        if part:
-            metrics[subset] = summarize(part)
+    supported = [row for row in rows if row["is_supported"]]
+    if supported:
+        metrics["supported"] = summarize(supported)
     metrics["articles"] = len(results)
     if stats["deletion_candidates"]:
         metrics["deletion_win_rate"] = stats["deletion_wins"] / stats["deletion_candidates"]

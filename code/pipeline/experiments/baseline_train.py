@@ -8,26 +8,18 @@ LLaDA's bidirectional, evidence-conditioned representation buys over generic
 sentence semantics: if this baseline matches or beats LLaDA's numbers, the
 8B backbone isn't earning its cost, at least not for this classifier.
 
-No GPU, no Ada, no cached features needed -- reads the collated JSONL
+No GPU, no Ada, no cached features needed -- reads the dataset JSONL
 directly and runs entirely on CPU in minutes. Default encoder is
 sentence-transformers/all-MiniLM-L6-v2 (~80MB) via plain transformers
 (mean-pooling implemented by hand below, so no new sentence-transformers
 package dependency).
-
-CAVEAT: same as experiments.evidence_train -- the team's audit
-(audit/noise.json) estimates ~40-60% label noise per class in the training
-labels. A weak result here does not prove LLaDA is necessary; it could be
-the same label noise dragging every approach down equally.
 
 Without --val, a seeded fraction of the train articles is held out, chosen by
 classifier.train.split_by_article, the same rule the LLaDA heads use.
 
 Usage:
     python -m experiments.baseline_train \
-        --train ../datasets/collated/train.jsonl --out heads/baseline
-    python -m experiments.baseline_train \
-        --train ../datasets/collated/train.jsonl --val ../datasets/collated/val.jsonl \
-        --eval ../datasets/collated/test.jsonl --out heads/baseline
+        --train ../datasets/synthetic/split/train.jsonl --out heads/baseline
 """
 
 import argparse
@@ -175,7 +167,7 @@ def train_one(args, x_train, y_train, x_val, y_val, seed, device, embedder, out,
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", required=True)
-    parser.add_argument("--val", help="collated JSONL for val; if omitted a holdout is carved from train")
+    parser.add_argument("--val", help="dataset JSONL for val; if omitted a holdout is carved from train")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out when --val is not given")
     parser.add_argument("--eval", nargs="*", default=[])
     parser.add_argument("--model", default=DEFAULT_MODEL)
