@@ -110,18 +110,21 @@ DURATION = [re.compile(p, re.IGNORECASE) for p in (
     rf"\b{NUMBER}-year\b(?!-old)",
     r"\b(?P<n>\d{1,3}(?:st|nd|rd|th)) anniversary\b")]
 
-# (male, female) role nouns. Nouns that are also common in names, titles or
-# other senses ("man", "lord", "host", "count") are left out.
-GENDERED = [("actor", "actress"), ("businessman", "businesswoman"), ("sportsman", "sportswoman"),
-            ("chairman", "chairwoman"), ("congressman", "congresswoman"), ("spokesman", "spokeswoman"),
-            ("councilman", "councilwoman"), ("policeman", "policewoman"), ("horseman", "horsewoman"),
-            ("craftsman", "craftswoman"), ("statesman", "stateswoman"), ("frontman", "frontwoman"),
-            ("king", "queen"), ("prince", "princess"), ("duke", "duchess"), ("emperor", "empress"),
-            ("baron", "baroness"), ("son", "daughter"), ("brother", "sister"), ("father", "mother"),
-            ("husband", "wife"), ("nephew", "niece"), ("grandson", "granddaughter"), ("uncle", "aunt"),
-            ("godfather", "godmother"), ("schoolboy", "schoolgirl"), ("monk", "nun"), ("waiter", "waitress")]
+# (male, female) role nouns that the gender kind flips. Nouns that are also
+# common in names, titles or other senses ("man", "lord", "host", "count")
+# are left out. The -man compounds are not flipped, because their -woman forms
+# are rare in the seed text, so a flipped "businesswoman" would almost always
+# be stale. They still count as gendered nouns of an article.
+GENDERED = [("actor", "actress"), ("king", "queen"), ("prince", "princess"), ("duke", "duchess"),
+            ("emperor", "empress"), ("baron", "baroness"), ("son", "daughter"), ("brother", "sister"),
+            ("father", "mother"), ("husband", "wife"), ("nephew", "niece"), ("grandson", "granddaughter"),
+            ("uncle", "aunt"), ("godfather", "godmother"), ("schoolboy", "schoolgirl"), ("monk", "nun"),
+            ("waiter", "waitress")]
+COMPOUNDS = [(f"{w}man", f"{w}woman") for w in ("business", "sports", "chair", "congress", "spokes", "council",
+                                                 "police", "horse", "crafts", "states", "front")]
 OPPOSITE = {**dict(GENDERED), **{f: m for m, f in GENDERED}}
 FEMALE = {f for _, f in GENDERED}
+GENDERED_WORDS = set(OPPOSITE) | {w for pair in COMPOUNDS for w in pair}
 PRONOUNS = {"M": re.compile(r"\b(?:he|him|his|himself)\b", re.IGNORECASE),
             "F": re.compile(r"\b(?:she|her|hers|herself)\b", re.IGNORECASE)}
 HONORIFIC = re.compile(r"\b(?:Sir|Dame|Mr|Mrs|Ms|Miss|Madame|Lady|Lord)\b")
@@ -449,7 +452,7 @@ class CascadeMutator:
         if len(genders) != 1 or HONORIFIC.search(text):
             return None
         gender = genders[0]
-        nouns = [w for w in re.findall(r"[a-z]+", text.lower()) if w in OPPOSITE or w[:-1] in OPPOSITE]
+        nouns = [w for w in re.findall(r"[a-z]+", text.lower()) if w in GENDERED_WORDS or w[:-1] in GENDERED_WORDS]
         if len(nouns) != 1:
             return None
         for j in order:
