@@ -16,7 +16,7 @@ the source and the mutated sentence the target:
               word, by its mutated string, so the evidence states the new
               values. Cascade sentences have no evidence of their own.
 
-Three changes are undone, so the sentence keeps its real text:
+These changes are undone, so the sentence keeps its real text:
 
     names       the first name that the gender kind gave the subject
     ambiguous   a gender link whose direct edit turns "actress" into "actor",
@@ -24,6 +24,10 @@ Three changes are undone, so the sentence keeps its real text:
                 follow from it. The direct edit and its cascades are undone.
     conflict    a real string that two sentences mutate into different
                 strings. The later sentence's change is undone.
+
+    listed      a link listed in --undo, so that a kind does not make its cue
+                words (country names, demonyms, occupations) stale far more
+                often than other words.
 
 A link whose direct or cascade sentence loses a span this way is removed,
 and its cascade sentences are undone with it.
@@ -48,6 +52,7 @@ tasks.py and merge.py.
 Usage:
     python reverse.py split/train.jsonl reversed/train.jsonl --rejects reversed/train_rejects.json
     python reverse.py rejected.jsonl flipped.jsonl --flip-only
+    python reverse.py split/train.jsonl reversed/train.jsonl --undo undo.json
 """
 
 import argparse
@@ -95,8 +100,11 @@ def same_case(new, old):
     return new
 
 
-def flip(record):
-    """(reversed record with the old evidence, changes {i: [(old, new)]}) or (None, "insertion")."""
+def flip(record, listed=()):
+    """(reversed record with the old evidence, changes {i: [(old, new)]}) or (None, "insertion").
+
+    listed holds (direct, cascade) pairs of links to undo.
+    """
     gender = any(link.get("kind") == "gender" for link in record.get("cascades", []))
     spans = {}
     for i, (source, entry) in enumerate(zip(record["source_sentences"], record["labels"])):
@@ -113,7 +121,8 @@ def flip(record):
         spans[i] = kept
 
     links = list(record.get("cascades", []))
-    undo = set()
+    undo = {end for link in links if (link["direct"], link["cascade"]) in set(map(tuple, listed))
+            for end in (link["direct"], link["cascade"])}
     for link in links:
         news = [new.lower() for _, _, _, new in spans.get(link["direct"], [])]
         if link.get("kind") == "gender" and NEUTRAL & set(news):
@@ -197,13 +206,15 @@ def main():
     parser.add_argument("out")
     parser.add_argument("--flip-only", action="store_true", help="keep the old evidence and run no evidence check")
     parser.add_argument("--rejects", help="write {id: reason} of the records left out here")
+    parser.add_argument("--undo", help="JSON {id: [[direct, cascade], ...]} of links to undo")
     args = parser.parse_args()
     stats, rejects = Counter(), {}
+    undo = json.loads(Path(args.undo).read_text()) if args.undo else {}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.data) as f, open(args.out, "w") as out:
         for line in f:
             record = json.loads(line)
-            flipped, changes = flip(record)
+            flipped, changes = flip(record, undo.get(record["id"], ()))
             reason = changes if flipped is None else None
             if flipped is not None and not args.flip_only:
                 flipped, reason = substitute(flipped, changes)

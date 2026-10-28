@@ -1,8 +1,8 @@
 """Split the synthetic set into train, val and test by seed article.
 
-Records made from the same seed paragraph share their first sentence, taken
-from the gold text, or from the source when the sentence is a DROP, which the
-generator does not alter. All records of one seed go to the same split, so no
+Records made from the same seed paragraph share their first sentence. The
+set is reversed (reverse.py), so the source is the real Wikipedia text and
+the key is the first source sentence. All records of one seed go to the same split, so no
 test article has a near copy in train. A seed's split follows from a hash of
 its first sentence and --seed, so adding records to the set does not move any
 existing record to another split. Val and test are held out for evaluation,
@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 def seed_key(record):
-    first = record["labels"][0]["target"] or record["source_sentences"][0]
+    first = record["source_sentences"][0]
     return " ".join(re.findall(r"\w+", first.lower()))
 
 

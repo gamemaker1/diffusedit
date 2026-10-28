@@ -155,6 +155,14 @@ NOT_NAMES = {"The", "This", "These", "That", "His", "Her", "Its", "Saint", "King
              "Professor", "Reverend", "Father", "Mother", "Sister", "Brother", "Bishop", "Cardinal", "President",
              "Senator", "Governor", "Judge", "Chief", "Duke", "Duchess", "Count", "Countess", "Baron", "Baroness",
              "Sheikh", "Sultan", "Rabbi", "Imam", "Saint", "Blessed", "Little", "Big", "Young", "Old", "Uncle", "Aunt"}
+# Female cues that are not role nouns, with their male forms, for _gender_cue.
+CUES = {"women's": "men's", "female": "male", "widow": "widower", "goddess": "god", "heroine": "hero",
+        "grandmother": "grandfather", "priestess": "priest", "abbess": "abbot", "girlfriend": "boyfriend",
+        "stepmother": "stepfather", "stepdaughter": "stepson", "marchioness": "marquess",
+        "viscountess": "viscount", "headmistress": "headmaster", "landlady": "landlord",
+        **{f: m for m, f in COMPOUNDS}, "sportswoman": "sportsman"}
+CUE = re.compile(r"\b(?:%s)\b" % "|".join(sorted(map(re.escape, CUES), key=len, reverse=True)), re.IGNORECASE)
+ACTING = re.compile(r"\bact(?:or|ress)(?:es|s)?\b", re.IGNORECASE)
 PRONOUNS = {"M": re.compile(r"\b(?:he|him|his|himself)\b", re.IGNORECASE),
             "F": re.compile(r"\b(?:she|her|hers|herself)\b", re.IGNORECASE)}
 HONORIFIC = re.compile(r"\b(?:Sir|Dame|Mr|Mrs|Ms|Miss|Madame|Lady|Lord)\b")
@@ -485,7 +493,7 @@ class CascadeMutator:
         gender = genders[0]
         nouns = [w for w in re.findall(r"[a-z]+", text.lower()) if w in GENDERED_WORDS or w[:-1] in GENDERED_WORDS]
         if len(nouns) != 1:
-            return None
+            return self._gender_cue(sentences, order) if gender == "F" and not nouns else None
         for j in order:
             m = ROLE_GENDER.search(sentences[j])
             if not m or PRONOUNS[gender].search(sentences[j]) or (m.group("noun") in FEMALE) != (gender == "F"):
@@ -513,6 +521,31 @@ class CascadeMutator:
                     else:
                         edits[i] += renamed
             return self._pair(sentences, j, rj, edits, f"{noun} / {'she' if gender == 'F' else 'he'}", "gender")
+        return self._gender_cue(sentences, order) if gender == "F" else None
+
+    def _gender_cue(self, sentences, order):
+        """A woman's article without a female role noun: j holds a female cue ("women's", "businesswoman").
+
+        The cue and the subject's pronouns take the male forms. Female role
+        nouns are rare outside "actress", and "actor" does not show that the
+        subject is a man, so this path gives the woman-to-man gender cascades.
+        """
+        text = " ".join(sentences)
+        if ACTING.search(text) or PRONOUNS["M"].search(text):
+            return None
+        for j in order:
+            if PRONOUNS["F"].search(sentences[j]) or not CUE.search(sentences[j]):
+                continue
+            ks = [k for k in range(len(sentences)) if k != j and PRONOUNS["F"].search(sentences[k])]
+            if not 1 <= len(ks) <= 3 or any(CUE.search(s) for i, s in enumerate(sentences) if i != j and i not in ks):
+                return None
+            def flips(sentence):
+                return [Replacement(m.start(), m.end(), m.group(), same_case(CUES[m.group().lower()], m.group()), "ROLE")
+                        for m in CUE.finditer(sentence)]
+            edits = {k: [Replacement(p.start(), p.end(), p.group(), swap_pronoun(p, sentences[k]), "PRONOUN")
+                         for p in PRONOUNS["F"].finditer(sentences[k])] + flips(sentences[k]) for k in ks}
+            rj = flips(sentences[j])
+            return self._pair(sentences, j, rj, edits, f"{rj[0].original} / she", "gender")
         return None
 
     def _field(self, sentences, article, order):
