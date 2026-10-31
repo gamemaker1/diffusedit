@@ -142,8 +142,10 @@ def main():
     if missing:
         parser.error(f"--detector {args.detector} needs {' '.join(missing)}")
 
-    import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
+    if args.detector != "mention":
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     detector, layer, classifier = build(args, device)
     before = Rows(args.features, layer) if args.features and layer else None
     after = Rows(args.features_after, layer) if args.features_after and layer else None

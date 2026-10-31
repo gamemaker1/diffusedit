@@ -13,6 +13,15 @@ A deletion candidate (every span at length 0) wins only when its score beats
 the best rewrite by the deletion margin, since removing a span also removes
 the claim the verifier would have checked.
 
+Two optional terms follow fact-correction work and are off by default.
+--edit-penalty b subtracts b times the word-level Levenshtein distance between
+the candidate and the sentence before repair, the Hamming energy of VENCE
+(Chen et al. 2022), so a rewrite pays for every word it adds or changes.
+--reject-unsupported subtracts REJECT from a candidate that adds a capitalised
+word or a number found in neither the evidence nor the sentence before repair,
+the unsupported entity tokens of FRUIT (Logan IV et al. 2022). A rejected
+candidate still wins when every candidate is rejected.
+
 Two options trade exactness for cost and are off by default, matching the
 paper. --pll-context local scores against the neighbouring sentences instead
 of the full evidence + article input. --pll-window w probes only the tokens
@@ -23,13 +32,18 @@ range as Ent, so that lam weighs comparable quantities.
 
 from dataclasses import dataclass, field
 
+import re
+
 import numpy as np
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from infilling.model import MASK_ID
+from infilling.spans import words
 
 VERIFIER = "tals/albert-base-vitaminc-mnli"
+REJECT = 100.0
+PIECE = re.compile(r"[\w'-]+")
 
 
 @dataclass
@@ -40,6 +54,8 @@ class Candidate:
     deletion: bool
     confidence: list[float] = field(default_factory=list)
     duplicate_of: int | None = None
+    original: bool = False
+    copied: str | None = None
     pll: float | None = None
     ent: float | None = None
     score: float | None = None
@@ -128,6 +144,35 @@ def score(model, verifier, article, j, candidates, evidence, tok, settings):
             c.score = c.ent
         else:
             c.score = settings.lam * c.pll + (1 - settings.lam) * c.ent
+
+
+def levenshtein(a, b):
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        prev, row[0] = row[0], i
+        for k, y in enumerate(b, 1):
+            prev, row[k] = row[k], min(row[k] + 1, row[k - 1] + 1, prev + (x != y))
+    return row[-1]
+
+
+def names(text):
+    """Words of the capitalised words and numbers of `text`, lower-cased."""
+    return {w for piece in PIECE.findall(text) if piece[0].isupper() or piece[0].isdigit() for w in words(piece)}
+
+
+def adjust(candidates, reference, known, tok, settings, stats):
+    """Apply the edit penalty and the unsupported-word rejection to every score.
+    `reference` is the sentence before repair and `known` the evidence words."""
+    if not settings.edit_penalty and not settings.reject_unsupported:
+        return
+    ref_words, ref_names = words(reference), names(reference)
+    for c in candidates:
+        text = tok.decode(c.tokens.tolist())
+        if settings.edit_penalty:
+            c.score -= settings.edit_penalty * levenshtein(words(text), ref_words)
+        if settings.reject_unsupported and names(text) - ref_names - known:
+            c.score -= REJECT
+            stats["rejected"] += 1
 
 
 def pick(candidates, margin):

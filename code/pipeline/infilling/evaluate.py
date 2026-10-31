@@ -1,6 +1,11 @@
 """Score an infilling run against the gold rewrites of its EDIT sentences.
 
-For every repaired sentence, with the gold rewrite as reference:
+Every run is scored on the same sentences, every EDIT sentence of the articles
+it read, so that runs which repair fewer sentences are compared on the same
+set. A sentence the run left unrepaired is scored as its source sentence, with
+the source as its only candidate. A sentence outside the EDIT set that the run
+repaired, which infilling.loop can do, is scored too. For every sentence, with
+the gold rewrite as reference:
 
     chosen      ROUGE-1/2/L F1 of the output sentence
     copy        the same for the unrepaired source sentence, as a floor
@@ -20,7 +25,8 @@ new word of the gold rewrite appears in the evidence or the source sentence,
 so the input contains the new facts.
 
 masked_fraction is the share of source characters the run masked, and
-stale_fraction the share the derived labels mark stale.
+stale_fraction the share the derived labels mark stale. `repaired` is the
+fraction of sentences the run repaired.
 
 Usage:
     python -m infilling.evaluate runs/oracle ../datasets/synthetic/split/train.jsonl
@@ -89,7 +95,8 @@ def main():
         stats.update(result["stats"])
         # infilling.loop can repair a sentence in several rounds. Each repaired
         # sentence counts once, with the candidates and masks of all its rounds.
-        merged = {}
+        merged = {j: {"sentence": j, "decisions": [], "masked": []}
+                  for j, entry in enumerate(record["labels"]) if entry.get("label") == "EDIT"}
         for edit in result["edits"]:
             entry = merged.setdefault(edit["sentence"], {"sentence": edit["sentence"], "decisions": [], "masked": []})
             entry["decisions"] += edit["decisions"]
@@ -100,13 +107,14 @@ def main():
             source, output = result["source"][j], result["output"][j]
             entry = record["labels"][j]
             evidence = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
-            texts = [c["text"] for d in edit["decisions"] for c in d["candidates"]]
+            texts = [c["text"] for d in edit["decisions"] for c in d["candidates"]] or [source]
             chosen = scorer.score(target, output)
             copy = scorer.score(target, source)
             row = {f"chosen_{m}": chosen[m].fmeasure for m in ROUGE}
             row.update({f"copy_{m}": copy[m].fmeasure for m in ROUGE})
             row["pool_rougeL"] = max(scorer.score(target, t)["rougeL"].fmeasure for t in texts)
             new = words(target) - words(source)
+            row["repaired"] = float(bool(edit["decisions"]))
             row["masked_fraction"] = sum(len(m) for m in edit.get("masked", [])) / max(len(source), 1)
             if "stale_spans" in entry:
                 row["stale_fraction"] = sum(b - a for a, b in entry["stale_spans"]) / max(len(source), 1)

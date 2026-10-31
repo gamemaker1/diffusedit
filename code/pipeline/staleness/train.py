@@ -23,7 +23,9 @@ to heldout_ids.json in --out, for infilling.run --ids.
 
 With --val, the head fits on every train token, val drives early stopping
 and tau, and --test is scored once with that tau. --save-predictions then
-writes the test token probabilities to test_predictions.npz.
+writes the test token probabilities to test_predictions.npz, with the token
+rows (every finished token of the test directory, in row order), their
+article indices, labels and tau.
 
 --loss focal replaces the weighted binary cross-entropy with a binary focal
 loss. --seeds trains once per seed, each with its own initialization (and its
@@ -244,8 +246,9 @@ def train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, he
                                 probs=val_probs.numpy().astype(np.float16), labels=y_val.numpy().astype(np.int8),
                                 tau=tau)
     if test is not None and args.save_predictions:
-        np.savez_compressed(out / "test_predictions.npz", probs=test_probs.numpy().astype(np.float16),
-                            labels=test[1].numpy().astype(np.int8), tau=tau)
+        np.savez_compressed(out / "test_predictions.npz", rows=np.arange(len(test[1])), article=test[2],
+                            probs=test_probs.numpy().astype(np.float16), labels=test[1].numpy().astype(np.int8),
+                            tau=tau)
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "layer": layer, "tau": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -281,7 +284,7 @@ def main():
             raise SystemExit(f"train token_layer {layer} != val token_layer {val_layer}")
         x_train, y_train = load(args.train, layer)
         x_val, y_val = load(args.val, layer)
-        test = load(args.test, layer) if args.test else None
+        test = (*load(args.test, layer), token_articles(args.test)[0]) if args.test else None
         for seed in args.seeds or [args.seed]:
             out = Path(args.out) / f"seed{seed}" if args.seeds else Path(args.out)
             train_one(args, layer, x_train, y_train, x_val, y_val, seed, out, device, test=test)

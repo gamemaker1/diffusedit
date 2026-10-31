@@ -65,10 +65,11 @@ from classifier.extract import Stop, attach, select
 from classifier.inputs import DROP, EDIT, KEEP, LABELS, SEPARATOR, build, encode, evidence_ids, read_jsonl
 from classifier.train import decide
 from infilling.model import Model
+from infilling.ner import path_of as entity_path
 from infilling.repair import repair_sentence
 from infilling.run import arguments, check, done_ids, load_head, settings_of
 from infilling.score import Verifier
-from infilling.spans import Article, oracle_spans, policy_spans, snap, word_starts
+from infilling.spans import Article, evidence_words, oracle_spans, policy_spans, screen, snap, word_starts
 
 DETECTORS = ("none", "mention", "edited_as_evidence", "staleness_delta", "consequence")
 
@@ -188,6 +189,9 @@ def main():
     finished = done_ids(results_path)
 
     settings = settings_of(args)
+    entities = {}
+    if args.evidence_copy and entity_path(args.data).exists():
+        entities = json.loads(entity_path(args.data).read_text())
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     model = Model(args.model, args.quant, tok)
     generator = torch.Generator(device=model.device).manual_seed(args.seed)
@@ -266,7 +270,7 @@ def main():
                 scores = token_scores(states, spans_now, ev_range)
                 previous = [text(j) for j in range(n)]
                 before = {layer: pool(states[layer], spans_now) for layer in layers}
-                repaired, start = [], {}
+                repaired, saved = [], {}
                 for j in todo:
                     counts = article.counts[j]
                     if args.masks == "oracle" and np.array_equal(article.sentences[j], original[j]):
@@ -280,14 +284,18 @@ def main():
                     if args.whole_words and spans:
                         pieces = [tok.decode([int(t)]) for t in article.sentences[j]]
                         spans = snap(spans, word_starts(pieces), stats)
+                    if args.masks != "oracle" and spans:
+                        texts = [tok.decode(article.sentences[j][a:b].tolist()) for a, b in spans]
+                        spans = screen(spans, texts, evidence_words(evidence_text), args.evidence_veto,
+                                       args.max_spans, stats)
                     if not spans:
                         stats["no_mask"] += 1
                         continue
                     stats["sentences"] += 1
                     masked = [tok.decode(article.sentences[j][a:b].tolist()) for a, b in spans]
-                    start[j] = (article.sentences[j], article.counts[j], spans)
+                    saved[j] = (article.sentences[j], article.counts[j], spans)
                     decisions = repair_sentence(model, verifier, article, j, spans, evidence_text,
-                                                tok, settings, generator, stats)
+                                                tok, settings, generator, stats, entities.get(record["id"]))
                     repaired.append(j)
                     edits.append({"round": r, "sentence": j, "spans": [list(s) for s in spans],
                                   "masked": masked, "decisions": decisions})
@@ -299,10 +307,10 @@ def main():
                         extra = carry.augment_evidence(evidence, {i: text(i) for i in repaired if i != j}, r)
                         set_evidence(article, tok, extra)
                         first = text(j)
-                        article.sentences[j], article.counts[j], spans = start[j]
+                        article.sentences[j], article.counts[j], spans = saved[j]
                         decisions = repair_sentence(model, verifier, article, j, spans,
                                                     [f"{s['title']}: {s['text']}" for s in extra],
-                                                    tok, settings, generator, Counter())
+                                                    tok, settings, generator, Counter(), entities.get(record["id"]))
                         round_edits[j]["first_pass"] = round_edits[j]["decisions"]
                         round_edits[j]["decisions"] = decisions
                         stats["second_pass"] += 1

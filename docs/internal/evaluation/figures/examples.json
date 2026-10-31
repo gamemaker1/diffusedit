@@ -1,0 +1,191 @@
+[
+ {
+  "id": "synthetic-000294",
+  "sentence": 0,
+  "source": "Drumry railway station serves the Drumry and Linnvale area of Clydebank, West Dunbartonshire, Scotland.",
+  "target": "Drumry railway station serves the Drumry and Linnvale area of Leigh, West Dunbartonshire, Scotland.",
+  "evidence": [
+   {
+    "title": "Clyde Valley Station Guide",
+    "text": "Drumry station serves homes in Drumry and Linnvale, districts of Leigh in West Dunbartonshire, and sits on a short branch of suburban track."
+   },
+   {
+    "title": "ScotRail Services on the Clyde",
+    "text": "ScotRail manages the stop, where trains of the Argyle Line and the North Clyde Line call throughout the day."
+   }
+  ],
+  "masked": [
+   " Clydebank",
+   " Scotland"
+  ],
+  "heuristic": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire, Scotland.",
+  "learned": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire, Scotland.",
+  "candidates": [
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire, Scotland.",
+    "lengths": [
+     0,
+     1
+    ],
+    "pll": -0.32204846541086835,
+    "ent": 0.0015974128618836403,
+    "score": -0.26022552627449236,
+    "copied": null,
+    "deletion": true
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of Barrhead, West Dunbartonshire, Scotland.",
+    "lengths": [
+     2,
+     1
+    ],
+    "pll": -0.15251686022831842,
+    "ent": 0.0017146918689832091,
+    "score": -100.17540108417967,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of Sighthill, West Dunbartonshire, Scotland.",
+    "lengths": [
+     3,
+     1
+    ],
+    "pll": -0.1432467301686605,
+    "ent": 0.00172192114405334,
+    "score": -100.1707624045123,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of the northern suburbs of Glasgow, West Dunbartonshire, Scotland.",
+    "lengths": [
+     5,
+     1
+    ],
+    "pll": -0.21779473074551287,
+    "ent": 0.002430748427286744,
+    "score": -100.60768199115911,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire,.",
+    "lengths": [
+     0
+    ],
+    "pll": -0.7460965695588485,
+    "ent": 0.0018016127869486809,
+    "score": -0.5721474783859499,
+    "copied": null,
+    "deletion": true
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire, Scotland.",
+    "lengths": [
+     1
+    ],
+    "pll": -0.32204846541086835,
+    "ent": 0.0015974099515005946,
+    "score": -0.2602255277296839,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Drumry railway station serves the Drumry and Linnvale area of, West Dunbartonshire, Glasgow, Scotland.",
+    "lengths": [
+     3
+    ],
+    "pll": -0.3118728490976187,
+    "ent": 0.0015069697983562946,
+    "score": -100.35518293964964,
+    "copied": null,
+    "deletion": false
+   }
+  ],
+  "rougeL": [
+   0.962962962962963,
+   0.9285714285714286,
+   0.9285714285714286,
+   0.8125000000000001,
+   0.923076923076923,
+   0.962962962962963,
+   0.9285714285714286,
+   0.9285714285714286
+  ]
+ },
+ {
+  "id": "synthetic-000722",
+  "sentence": 1,
+  "source": "Prior to European contact, the Batswana lived as herders and farmers under tribal rule.",
+  "target": "Prior to Roman contact, the Batswana lived as herders and farmers under tribal rule.",
+  "evidence": [
+   {
+    "title": "Pre-colonial societies of the Kalahari margins",
+    "text": "Before the arrival of Roman traders and missionaries, the Saint-Gilles/Sint-Gillis farmed, herded cattle and lived under chiefs."
+   },
+   {
+    "title": "Peoples of southern Africa",
+    "text": "The Saint-Gilles/Sint-Gillis are the main ethnic group of Botswana, and the term Batswana is also applied to all citizens of the country."
+   }
+  ],
+  "masked": [
+   " European"
+  ],
+  "heuristic": "Prior to European contact, the Batswana lived as herders and farmers under tribal rule.",
+  "learned": "Prior to Roman contact, the Batswana lived as herders and farmers under tribal rule.",
+  "candidates": [
+   {
+    "text": "Prior to contact, the Batswana lived as herders and farmers under tribal rule.",
+    "lengths": [
+     0
+    ],
+    "pll": -0.8573717229506549,
+    "ent": 0.021476078778505325,
+    "score": -0.5179478220860748,
+    "copied": null,
+    "deletion": true
+   },
+   {
+    "text": "Prior to European contact, the Batswana lived as herders and farmers under tribal rule.",
+    "lengths": [
+     1
+    ],
+    "pll": -0.5636639065212674,
+    "ent": 0.02072826959192753,
+    "score": -0.27146781846466994,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Prior to European and missionary contact, the Batswana lived as herders and farmers under tribal rule.",
+    "lengths": [
+     3
+    ],
+    "pll": -0.6462258338928223,
+    "ent": 0.06055282801389694,
+    "score": -0.4928365029394627,
+    "copied": null,
+    "deletion": false
+   },
+   {
+    "text": "Prior to Roman contact, the Batswana lived as herders and farmers under tribal rule.",
+    "lengths": [
+     1
+    ],
+    "pll": -0.7366234991285536,
+    "ent": 0.04074682295322418,
+    "score": -0.4479383380876647,
+    "copied": "Roman",
+    "deletion": false
+   }
+  ],
+  "rougeL": [
+   0.962962962962963,
+   0.9285714285714286,
+   0.8666666666666666,
+   1.0,
+   0.9285714285714286
+  ]
+ }
+]

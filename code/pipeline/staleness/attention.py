@@ -37,15 +37,33 @@ scores the same.
 Needs classifier.extract output with tokens/evidence_layer{L}.npy (the
 default with evidence in the input).
 
+--eval-only loads <out>/head.pt and scores --test and the controls with its
+moments, tau and tau_match, without training. --train and --val are then not
+read, and the test directory may be a fresh extraction of the test split. The
+result goes to eval.json, and head.pt, metrics.json and sweep.json are left
+as they are. --seed must be the training seed for the same shuffled pairing.
+
+--save-predictions writes the test tokens' probabilities with and without the
+evidence to test_predictions.npz. Articles are scored in index order and the
+tokens of one article in row order, so with token rows sorted by article (as
+classifier.extract writes them) the file follows the rows of the test
+directory, the order of staleness.train's test_predictions.npz.
+
 Output directory:
     head.pt           state dict, configuration, moments, layer, tau, tau_match
     metrics.json      val PR-AUC, AUROC and F1 at tau, the same on test, and the two controls
     sweep.json        precision, recall and masked share per tau, and tau_match,
                       the tau whose masked share is closest to the stale share
     heldout_ids.json  held-out article ids without --val, for infilling.run --ids
+    eval.json         with --eval-only, the test and controls entries of metrics.json
+    test_predictions.npz  with --save-predictions, per test token: rows (token row
+                      of the test directory), article, probs, probs_shuffled_evidence,
+                      probs_no_evidence (float16), labels (int8), and tau
 
 Usage:
     python -m staleness.attention --train features/train --val features/val --test features/test \
+        --out heads/staleness_attention
+    python -m staleness.attention --eval-only --save-predictions --test features/test_tokens \
         --out heads/staleness_attention
 """
 
@@ -210,12 +228,81 @@ class Scorer:
         return self.head(tokens, evidence, mask).sigmoid()[0]
 
 
+def with_controls(head, data, articles, norm, device, batch_tokens, seed):
+    """Probabilities of the tokens of `articles` with their own evidence, with another
+    article's (a seeded derangement of `articles`) and with none, and their labels."""
+    p, ys = predict(head, data, articles, norm, device, batch_tokens)
+    shuffled = dict(zip(articles, np.roll(np.random.default_rng(seed).permutation(articles), 1).tolist()))
+    p_shuffled, _ = predict(head, data, articles, norm, device, batch_tokens, evidence_from=shuffled)
+    p_none, _ = predict(head, data, articles, norm, device, batch_tokens, no_evidence=True)
+    return p, p_shuffled, p_none, ys
+
+
+def report(p, p_shuffled, p_none, ys, tau, tau_match, test):
+    """The "test" (when the tokens are the test set) and "controls" entries of metrics.json."""
+    out = {}
+    if test:
+        out["test"] = {**scores(ys, (p >= tau).float()), "pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p),
+                       "masked": (p >= tau_match).float().mean().item()}
+    out["controls"] = {
+        "set": "test" if test else "val",
+        "reference": {"pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p)},
+        "shuffled_evidence": {"pr_auc": pr_auc(ys, p_shuffled), "auroc": auroc(ys, p_shuffled)},
+        "no_evidence": {"pr_auc": pr_auc(ys, p_none), "auroc": auroc(ys, p_none)},
+    }
+    return out
+
+
+def save_predictions(path, data, articles, p, p_shuffled, p_none, ys, tau):
+    rows = np.concatenate([np.arange(*data.tokens[a]) for a in articles])
+    np.savez_compressed(path, rows=rows, article=data.article[rows].astype(np.int32),
+                        probs=p.numpy().astype(np.float16), labels=ys.numpy().astype(np.int8),
+                        probs_shuffled_evidence=p_shuffled.numpy().astype(np.float16),
+                        probs_no_evidence=p_none.numpy().astype(np.float16), tau=tau)
+
+
+def print_report(metrics):
+    if "test" in metrics:
+        print(f"test PR-AUC {metrics['test']['pr_auc']:.4f}  AUROC {metrics['test']['auroc']:.4f}  "
+              f"F1 {metrics['test']['f1']:.4f}")
+    for name, c in metrics["controls"].items():
+        if name != "set":
+            print(f"control {name}: PR-AUC {c['pr_auc']:.4f}  AUROC {c['auroc']:.4f}")
+
+
+def evaluate_saved(args, device):
+    """--eval-only: score --test and the controls with the saved head, into eval.json."""
+    out = Path(args.out)
+    ckpt = torch.load(out / "head.pt", map_location=device)
+    layer = ckpt["layer"]
+    if token_layer_of(args.test) != layer:
+        raise SystemExit(f"{args.test} token_layer {token_layer_of(args.test)} != head layer {layer}")
+    head = EvidenceAttention(**ckpt["config"]).to(device)
+    head.load_state_dict(ckpt["state_dict"])
+    norm = [ckpt[k].to(device) for k in ("mean", "std", "ev_mean", "ev_std")]
+    tau, tau_match = ckpt["tau"], ckpt["tau_match"]
+    data = Articles(args.test, layer)
+    articles = sorted(data.tokens)
+    p, p_shuffled, p_none, ys = with_controls(head, data, articles, norm, device, args.batch_tokens, args.seed)
+    metrics = {"head": str(out / "head.pt"), "features": str(args.test), "layer": layer, "tau": tau,
+               "tau_match": tau_match, "seed": args.seed,
+               **report(p, p_shuffled, p_none, ys, tau, tau_match, test=True)}
+    print_report(metrics)
+    (out / "eval.json").write_text(json.dumps(metrics, indent=2))
+    if args.save_predictions:
+        save_predictions(out / "test_predictions.npz", data, articles, p, p_shuffled, p_none, ys, tau)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--train", required=True)
+    parser.add_argument("--train")
     parser.add_argument("--out", required=True)
     parser.add_argument("--val", help="feature dir for early stopping and the thresholds")
     parser.add_argument("--test", help="feature dir scored once, with the controls")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="score --test with <out>/head.pt into eval.json, without training")
+    parser.add_argument("--save-predictions", action="store_true",
+                        help="write the test token probabilities and controls to test_predictions.npz")
     parser.add_argument("--holdout", type=float, default=0.1, help="fraction of train articles held out without --val")
     parser.add_argument("--dim", type=int, default=256, help="attention width r")
     parser.add_argument("--heads", type=int, default=4)
@@ -228,9 +315,15 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if args.eval_only and not args.test:
+        parser.error("--eval-only needs --test")
+    if not args.eval_only and not args.train:
+        parser.error("--train is required unless --eval-only")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
+    if args.eval_only:
+        return evaluate_saved(args, device)
     layer = token_layer_of(args.train)
     data = Articles(args.train, layer)
     if args.val:
@@ -292,27 +385,11 @@ def main():
     # The controls score the test set when there is one, else the val articles.
     scored, scored_ids = (Articles(args.test, layer), None) if args.test else (val_data, held)
     scored_ids = scored_ids or sorted(scored.tokens)
-    p, ys = predict(head, scored, scored_ids, norm, device, args.batch_tokens)
-    if args.test:
-        metrics["test"] = {**scores(ys, (p >= tau).float()), "pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p),
-                           "masked": (p >= tau_match).float().mean().item()}
-    shuffled = dict(zip(scored_ids, np.roll(np.random.default_rng(args.seed).permutation(scored_ids), 1).tolist()))
-    p_shuffled, _ = predict(head, scored, scored_ids, norm, device, args.batch_tokens, evidence_from=shuffled)
-    p_none, _ = predict(head, scored, scored_ids, norm, device, args.batch_tokens, no_evidence=True)
-    metrics["controls"] = {
-        "set": "test" if args.test else "val",
-        "reference": {"pr_auc": pr_auc(ys, p), "auroc": auroc(ys, p)},
-        "shuffled_evidence": {"pr_auc": pr_auc(ys, p_shuffled), "auroc": auroc(ys, p_shuffled)},
-        "no_evidence": {"pr_auc": pr_auc(ys, p_none), "auroc": auroc(ys, p_none)},
-    }
+    predictions = with_controls(head, scored, scored_ids, norm, device, args.batch_tokens, args.seed)
+    metrics.update(report(*predictions, tau, tau_match, test=bool(args.test)))
     print(f"tau {tau}  val F1 {metrics['val']['f1']:.4f}  val PR-AUC {metrics['val_pr_auc']:.4f}  "
           f"val AUROC {metrics['val_auroc']:.4f}  tau_match {tau_match}")
-    if args.test:
-        print(f"test PR-AUC {metrics['test']['pr_auc']:.4f}  AUROC {metrics['test']['auroc']:.4f}  "
-              f"F1 {metrics['test']['f1']:.4f}")
-    for name, c in metrics["controls"].items():
-        if name != "set":
-            print(f"control {name}: PR-AUC {c['pr_auc']:.4f}  AUROC {c['auroc']:.4f}")
+    print_report(metrics)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -325,6 +402,8 @@ def main():
     torch.save({"kind": "attention", "config": config, "state_dict": head.state_dict(),
                 "mean": mean, "std": std, "ev_mean": ev_mean, "ev_std": ev_std,
                 "layer": layer, "tau": tau, "tau_match": tau_match}, out / "head.pt")
+    if args.test and args.save_predictions:
+        save_predictions(out / "test_predictions.npz", scored, scored_ids, *predictions, tau)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ each span to whole words, so infilling never keeps half of a word, such as
 """
 
 import math
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -147,6 +148,37 @@ def snap(spans, starts, stats=None):
         else:
             out.append((a, b))
     return out
+
+
+WORD = re.compile(r"\w+")
+
+
+def words(text):
+    """Lower-cased word tokens of `text`."""
+    return [w.lower() for w in WORD.findall(text)]
+
+
+def evidence_words(evidence):
+    """Every word of the evidence snippets, lower-cased."""
+    return {w for snippet in evidence for w in words(snippet)}
+
+
+def screen(spans, texts, known, veto, max_spans, stats):
+    """Predicted spans after two checks of Section 7.1's policy.
+
+    With `veto`, a span whose words all occur in the evidence is unmasked, since
+    the evidence states those words and they are unlikely to be stale. With
+    `max_spans` above 0, a sentence left with more spans than that is not
+    repaired at all, since scattered masks mostly cover tokens that are not stale.
+    """
+    if veto:
+        kept = [s for s, t in zip(spans, texts) if not words(t) or not set(words(t)) <= known]
+        stats["vetoed"] += len(spans) - len(kept)
+        spans = kept
+    if max_spans and len(spans) > max_spans:
+        stats["over_span_cap"] += 1
+        return []
+    return spans
 
 
 def oracle_spans(stale, counts, c_max):

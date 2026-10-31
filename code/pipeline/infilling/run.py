@@ -45,8 +45,9 @@ from classifier.extract import select
 from classifier.inputs import DROP, EDIT, LABELS, MODEL, build, read_jsonl
 from infilling.model import Model
 from infilling.repair import Settings, repair_sentence
+from infilling.ner import path_of as entity_path
 from infilling.score import VERIFIER, Verifier
-from infilling.spans import Article, oracle_spans, policy_spans, snap, word_starts
+from infilling.spans import Article, evidence_words, oracle_spans, policy_spans, screen, snap, word_starts
 
 C_MAX = 3
 
@@ -73,6 +74,18 @@ def arguments(parser):
     parser.add_argument("--scorer", choices=["pll", "verifier", "combined"], default="combined")
     parser.add_argument("--lam", type=float, default=0.5, help="weight of PLL in the combined score")
     parser.add_argument("--deletion-margin", type=float, default=0.1, help="0 turns the margin off")
+    parser.add_argument("--keep-original", action="store_true",
+                        help="score each span's original tokens as one more candidate")
+    parser.add_argument("--edit-penalty", type=float, default=0.0,
+                        help="subtract this times the word edit distance to the sentence before repair")
+    parser.add_argument("--reject-unsupported", action="store_true",
+                        help="reject candidates adding a name or number found in neither the evidence nor the sentence")
+    parser.add_argument("--evidence-copy", type=int, default=0,
+                        help="per span, score this many candidates holding an evidence name or number verbatim")
+    parser.add_argument("--evidence-veto", action="store_true",
+                        help="with --masks predicted, unmask spans whose words all occur in the evidence")
+    parser.add_argument("--max-spans", type=int, default=0,
+                        help="with --masks predicted, leave a sentence unrepaired if it has more spans; 0 = no cap")
     parser.add_argument("--pll-context", choices=["full", "local"], default="full")
     parser.add_argument("--pll-window", type=int, default=0, help="probe tokens within w of a span; 0 = all")
     parser.add_argument("--pll-norm", choices=["raw", "exp"], default="raw")
@@ -106,7 +119,9 @@ def settings_of(args):
     return Settings(lengths=args.lengths, multi_span=args.multi_span, steps=args.steps,
                     temperature=args.temperature, scorer=args.scorer, lam=args.lam,
                     deletion_margin=args.deletion_margin, pll_context=args.pll_context,
-                    pll_window=args.pll_window, pll_norm=args.pll_norm, batch=args.batch)
+                    pll_window=args.pll_window, pll_norm=args.pll_norm, batch=args.batch,
+                    keep_original=args.keep_original, edit_penalty=args.edit_penalty,
+                    reject_unsupported=args.reject_unsupported, evidence_copy=args.evidence_copy)
 
 
 def load_head(path, device):
@@ -182,6 +197,13 @@ def main():
     verifier = None
     if args.evidence and args.scorer != "pll":
         verifier = Verifier(args.verifier, model.device, args.support_index)
+    entities = {}
+    if args.evidence_copy:
+        path = entity_path(args.data)
+        if path.exists():
+            entities = json.loads(path.read_text())
+        print(f"evidence copy: {len(entities)} articles with spaCy entities from {path}" if entities
+              else f"evidence copy: no {path}, capitalised words and numbers instead")
     head = None
     if args.masks == "predicted":
         head, layer, tuned_tau = load_head(args.staleness_head, model.device)
@@ -206,6 +228,7 @@ def main():
             source = record if args.evidence else {**record, "evidence": []}
             example = build(source, tok)
             evidence = [f"{s['title']}: {s['text']}" for s in source["evidence"]]
+            known = evidence_words(evidence)
             article = Article.from_example(example, tok.bos_token_id)
 
             if head is not None:
@@ -219,6 +242,9 @@ def main():
                     if args.whole_words and spans[j]:
                         pieces = [tok.decode([int(t)]) for t in article.sentences[j]]
                         spans[j] = snap(spans[j], word_starts(pieces), stats)
+                    if head is not None and spans[j]:
+                        texts = [tok.decode(article.sentences[j][a:b].tolist()) for a, b in spans[j]]
+                        spans[j] = screen(spans[j], texts, known, args.evidence_veto, args.max_spans, stats)
             for j, label in enumerate(example.labels):
                 if label == DROP:
                     article.drop(j)
@@ -231,7 +257,7 @@ def main():
                 stats["sentences"] += 1
                 masked = [tok.decode(article.sentences[j][a:b].tolist()) for a, b in sentence_spans]
                 decisions = repair_sentence(model, verifier, article, j, sentence_spans, evidence,
-                                            tok, settings, generator, stats)
+                                            tok, settings, generator, stats, entities.get(record["id"]))
                 edits.append({"sentence": j, "spans": [list(s) for s in sentence_spans],
                               "masked": masked, "decisions": decisions})
 
