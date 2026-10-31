@@ -1,18 +1,10 @@
-"""LLaDA-free sentence classifier baseline (team's "why use LLaDA at all"
-last-resort idea; also the original working-notes doc's "non-diffusion
-encoder" control, Section 4.4). Embeds each sentence -- and, for a fair
-comparison against experiments.evidence_train, its article's evidence too --
-with a small pretrained encoder that has NO evidence conditioning at all,
-then trains the SAME 3-way head as classifier.train. This isolates what
-LLaDA's bidirectional, evidence-conditioned representation buys over generic
-sentence semantics: if this baseline matches or beats LLaDA's numbers, the
-8B backbone isn't earning its cost, at least not for this classifier.
+"""Sentence classifier baseline without the diffusion model.
 
-No GPU, no Ada, no cached features needed -- reads the dataset JSONL
-directly and runs entirely on CPU in minutes. Default encoder is
-sentence-transformers/all-MiniLM-L6-v2 (~80MB) via plain transformers
-(mean-pooling implemented by hand below, so no new sentence-transformers
-package dependency).
+Each sentence and its article's evidence are embedded with a small pretrained
+sentence encoder that has no evidence conditioning, and the same three-way
+classifier as classifier.train is fit on the concatenation. The baseline
+measures what the hidden states of the frozen diffusion model add over
+generic sentence embeddings.
 
 With --val, the head fits on all of train and val drives early stopping and
 tau_d. --test is scored once with that tau_d, and --save-predictions writes
@@ -22,7 +14,7 @@ classifier.train.split_by_article, the same rule the LLaDA heads use.
 
 Usage:
     python -m experiments.baseline_train \
-        --train ../datasets/synthetic/split/train.jsonl --out heads/baseline
+        --train ../dataset/split/train.jsonl --out heads/baseline
 """
 
 import argparse

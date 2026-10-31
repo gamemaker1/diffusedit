@@ -27,7 +27,7 @@ are development numbers, and final numbers come from the test split.
 
     labels.jsonl  the format of cascading.evaluate, one line per evaluation
                   article, with its direct edits and its cascade sentences.
-                  shares_mention_with_direct follows datasets/collate.py.
+                  shares_mention_with_direct follows dataset/fruit/collate.py.
                   It is true when the mentions of both versions of k meet
                   the mentions of both versions of some direct edit. Each
                   cascade sentence also carries the kind of its link.
@@ -49,7 +49,7 @@ are development numbers, and final numbers come from the test split.
                   alone would separate the positives from the negatives.
 
 Usage:
-    python -m cascading.links ../datasets/synthetic/cascade/source.jsonl ../datasets/synthetic/cascade
+    python -m cascading.links ../dataset/cascade/source.jsonl ../dataset/cascade
     python -m cascading.links split/train.jsonl split/links/train --role train
     python -m cascading.links split/test.jsonl split/links/test --role eval
 """

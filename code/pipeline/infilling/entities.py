@@ -1,4 +1,4 @@
-"""Entity metrics for an infilling run (Section 9.2).
+"""Entity metrics for an infilling run.
 
 M(text) is the mention extractor of cascading.mentions: spaCy en_core_web_sm
 entities of the types in MENTION_LABELS, lowercased and stripped, plus every
@@ -22,7 +22,7 @@ Subsets: sentences with G - S non-empty, and the supported sentences of
 infilling.evaluate.
 
 Usage:
-    python -m infilling.entities runs/fix-oracle ../datasets/synthetic/split/train.jsonl
+    python -m infilling.entities runs/fix-oracle ../dataset/split/train.jsonl
 """
 
 import argparse

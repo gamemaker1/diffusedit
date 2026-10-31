@@ -4,7 +4,7 @@ Every sentence is read from the collated data or a saved infilling run by its
 article id and sentence index, never typed by hand, and escaped for LaTeX.
 
 Usage:
-    python -m analysis.report_examples --data ../datasets/collated/train.jsonl \\
+    python -m analysis.report_examples --data ../dataset/collated/train.jsonl \\
         --pre ../datasets/archive/collated/train.pre_keepfix.jsonl --runs outputs/jl/runs \\
         --out ../../docs/internal/progress/examples.tex
 """

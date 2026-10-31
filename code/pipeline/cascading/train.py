@@ -1,4 +1,4 @@
-"""Consequence prediction head — Section 6.4.
+"""The consequence classifier: whether a sentence must change because a repaired sentence did.
 
 Architecture (Equation 8):
     g_jk = σ( MLP_ψ( [u_j ; u_k ; u_j ⊙ u_k ; |u_j − u_k|] ) )
@@ -32,7 +32,7 @@ name sentences by article and sentence index ("article_id", "j", "k").
 
 Usage:
     python -m cascading.train --features features/cascade/source --features-after features/cascade/after \\
-        --pairs ../datasets/synthetic/cascade/pairs.jsonl --out heads/consequence
+        --pairs ../dataset/cascade/pairs.jsonl --out heads/consequence
     python -m cascading.train --features f/train --features-after f/train_after --pairs split/pairs.jsonl \\
         --val-features f/val --val-features-after f/val_after --val-pairs split/val_pairs.jsonl \\
         --test-features f/test --test-features-after f/test_after --test-pairs split/test_pairs.jsonl \\

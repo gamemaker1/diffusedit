@@ -1,4 +1,4 @@
-"""Cache mean-pooled LLaDA hidden states for every source sentence (Eq. 4).
+"""Cache mean-pooled LLaDA hidden states for every source sentence.
 
 One frozen forward pass per article over E ⊕ A, no masks. Forward hooks read
 the chosen blocks. The deepest hook stops the pass, so later blocks and the
@@ -27,7 +27,7 @@ Output directory:
                                    tokens are rows offsets[k] to offsets[k + 1]
 
 Usage:
-    python -m classifier.extract ../datasets/synthetic/split/train.jsonl features/train
+    python -m classifier.extract ../dataset/split/train.jsonl features/train
 """
 
 import argparse

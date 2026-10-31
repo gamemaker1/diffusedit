@@ -1,0 +1,547 @@
+{
+ "ladder": {
+  "Oracle masks, base": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.911557719819876,
+   "pool": 0.9559611558775641,
+   "sentences": 1670
+  },
+  "Oracle masks, no evidence": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.8541974822285614,
+   "pool": 0.9160719444116188,
+   "sentences": 1670
+  },
+  "Linear-head masks, base": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.8759179133237355,
+   "pool": 0.926145261881944,
+   "sentences": 1670
+  },
+  "Attention-head masks, base": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.883831890889282,
+   "pool": 0.9317579932673241,
+   "sentences": 1670
+  },
+  "Attention-head masks, v2": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.9124138168549202,
+   "pool": 0.9523819841877472,
+   "sentences": 1670
+  },
+  "Attention-head masks, v2, learned ranking": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.9286536242814741,
+   "pool": 0.9523819841877472,
+   "sentences": 1670
+  },
+  "Oracle masks, v2 (sample)": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.940650786418461,
+   "pool": 0.9811654950206699,
+   "sentences": 557
+  },
+  "Oracle masks, v2, learned ranking (sample)": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9546125392727426,
+   "pool": 0.9811654950206699,
+   "sentences": 557
+  }
+ },
+ "gains": {
+  "Oracle masks, base": {
+   "gain": 0.03685674754490453,
+   "low": 0.03221064727452106,
+   "high": 0.04173794742387765,
+   "sentences": 1670
+  },
+  "Oracle masks, no evidence": {
+   "gain": -0.020503490046410056,
+   "low": -0.022172318636011507,
+   "high": -0.018821564797504714,
+   "sentences": 1670
+  },
+  "Linear-head masks, base": {
+   "gain": 0.0012169410487640198,
+   "low": -0.003634598115178875,
+   "high": 0.005990047726745518,
+   "sentences": 1670
+  },
+  "Attention-head masks, base": {
+   "gain": 0.00913091861431059,
+   "low": 0.004826678963053999,
+   "high": 0.01379980609097872,
+   "sentences": 1670
+  },
+  "Attention-head masks, v2": {
+   "gain": 0.03771284457994872,
+   "low": 0.033473472519001096,
+   "high": 0.04248886661761241,
+   "sentences": 1670
+  },
+  "Attention-head masks, v2, learned ranking": {
+   "gain": 0.05395265200650268,
+   "low": 0.049033499389931456,
+   "high": 0.059003490635928156,
+   "sentences": 1670
+  },
+  "Oracle masks, v2 (sample)": {
+   "gain": 0.06444207360208609,
+   "low": 0.05453966077216438,
+   "high": 0.07539739016595219,
+   "sentences": 557
+  },
+  "Oracle masks, v2, learned ranking (sample)": {
+   "gain": 0.07840382645636768,
+   "low": 0.06897617734477636,
+   "high": 0.08919787730490314,
+   "sentences": 557
+  },
+  "T5 editor": {
+   "gain": 0.09854905072175324,
+   "low": 0.09188766016760748,
+   "high": 0.10507621794297352,
+   "sentences": 1670
+  }
+ },
+ "rules": {
+  "No edit penalty": {
+   "difference": -0.007719339364956168,
+   "low": -0.012271160202458617,
+   "high": -0.0031817083265573516,
+   "sentences": 557
+  },
+  "No rejection of unsupported words": {
+   "difference": -0.004973557929109251,
+   "low": -0.011014860609651284,
+   "high": -0.00043992057745845297,
+   "sentences": 557
+  },
+  "No evidence veto": {
+   "difference": -0.0021828087731313728,
+   "low": -0.004106535799063085,
+   "high": -0.0002930418770625805,
+   "sentences": 557
+  },
+  "No span cap": {
+   "difference": -0.00027406434859522655,
+   "low": -0.0031831729239394425,
+   "high": 0.0026877416444148483,
+   "sentences": 557
+  },
+  "No evidence-copy candidates": {
+   "difference": -0.0038720903204890744,
+   "low": -0.009959941785855802,
+   "high": 0.0014428223859849242,
+   "sentences": 557
+  },
+  "Learned ranking": {
+   "difference": 0.012111944762888127,
+   "low": 0.006026367346344772,
+   "high": 0.018574047132819745,
+   "sentences": 557
+  }
+ },
+ "lengths": {
+  "Same-length candidates only": {
+   "difference": 0.007529326789636137,
+   "low": 0.002232751123020285,
+   "high": 0.01234838253815875,
+   "sentences": 557
+  },
+  "PLL-only ranking": {
+   "difference": -0.001745270760688311,
+   "low": -0.0037045652380850503,
+   "high": 0.00012922336693743617,
+   "sentences": 557
+  },
+  "Verifier-only ranking": {
+   "difference": -0.005552953496037127,
+   "low": -0.010943945931745733,
+   "high": -0.00022752095946637402,
+   "sentences": 557
+  }
+ },
+ "values": {
+  "Copy": {
+   "exact": {
+    "value": 0.0,
+    "low": 0.0,
+    "high": 0.0
+   },
+   "new": {
+    "value": 0.03143712574850299,
+    "low": 0.024819769603050167,
+    "high": 0.038229171241743014
+   },
+   "old kept": {
+    "value": 1.0,
+    "low": 1.0,
+    "high": 1.0
+   }
+  },
+  "Heuristic ranking (fix-tuned)": {
+   "exact": {
+    "value": 0.25329341317365267,
+    "low": 0.23204739577356265,
+    "high": 0.2742334716641416
+   },
+   "new": {
+    "value": 0.39500998003992016,
+    "low": 0.37268728522955236,
+    "high": 0.4174170611100028
+   },
+   "old kept": {
+    "value": 0.4947692307692308,
+    "low": 0.47041137104283054,
+    "high": 0.5206197491684528
+   }
+  },
+  "Learned ranking (fix-rerank)": {
+   "exact": {
+    "value": 0.32335329341317365,
+    "low": 0.30128565146968045,
+    "high": 0.3454377743745688
+   },
+   "new": {
+    "value": 0.49850299401197606,
+    "low": 0.47625709275419903,
+    "high": 0.5213272867226233
+   },
+   "old kept": {
+    "value": 0.26061538461538464,
+    "low": 0.23993009088185363,
+    "high": 0.2808231863250111
+   }
+  },
+  "T5 editor": {
+   "exact": {
+    "value": 0.767065868263473,
+    "low": 0.7478920223561173,
+    "high": 0.7868788559500359
+   },
+   "new": {
+    "value": 0.8873253493013972,
+    "low": 0.8729908401722832,
+    "high": 0.9018749286519439
+   },
+   "old kept": {
+    "value": 0.10010256410256411,
+    "low": 0.08621225962860803,
+    "high": 0.11465651053480035
+   }
+  }
+ },
+ "picks": {
+  "heuristic": {
+   "evidence copy": 286,
+   "sampled, same length": 433,
+   "sampled, shorter": 120,
+   "sampled, longer": 102,
+   "deletion": 26,
+   "unchanged": 703
+  },
+  "learned": {
+   "evidence copy": 519,
+   "sampled, same length": 407,
+   "sampled, shorter": 90,
+   "sampled, longer": 92,
+   "deletion": 283,
+   "unchanged": 279
+  },
+  "sentences": 1670
+ },
+ "heads": {
+  "block 24": 0.8219166664266505,
+  "block 24, no evidence": 0.3349420096440506,
+  "MiniLM baseline": 0.4911055891714638,
+  "attention head": 0.8310112953186035,
+  "attention, evidence of another article": 0.6253933906555176,
+  "attention, no evidence": 0.7176730036735535,
+  "linear head": 0.7349614500999451,
+  "linear, no evidence": 0.34921205043792725
+ },
+ "loops": {
+  "No detector, one round": {
+   "cascade_rougeL": 0.2100349476057257,
+   "rougeL": 0.43586933317185234,
+   "keep_verbatim": 0.9288888888888889
+  },
+  "Staleness delta": {
+   "cascade_rougeL": 0.270122523532878,
+   "rougeL": 0.4484736334178767,
+   "keep_verbatim": 0.8666666666666667
+  },
+  "Edited as evidence": {
+   "cascade_rougeL": 0.27587529016318457,
+   "rougeL": 0.47574468874698617,
+   "keep_verbatim": 0.84
+  },
+  "Consequence head": {
+   "cascade_rougeL": 0.2959494945347359,
+   "rougeL": 0.47033987920947506,
+   "keep_verbatim": 0.8977777777777778
+  },
+  "Consequence, gold labels": {
+   "cascade_rougeL": 0.33899036559983353,
+   "rougeL": 0.5138154243703189,
+   "keep_verbatim": 1.0
+  }
+ },
+ "stress": {
+  "Clean val articles, base": {
+   "gain": 0.0074728154174795725,
+   "low": -5.4496177021348577e-05,
+   "high": 0.01578251981766212,
+   "sentences": 367
+  },
+  "Clean val articles, v2": {
+   "gain": 0.031058465919128864,
+   "low": 0.024176990547799697,
+   "high": 0.03814495272770488,
+   "sentences": 367
+  },
+  "Missing value, base": {
+   "gain": -0.05440731500118101,
+   "low": -0.06564791874925759,
+   "high": -0.04337624817345656,
+   "sentences": 367
+  },
+  "Missing value, v2": {
+   "gain": 0.0009262736480970535,
+   "low": -0.004620220875905209,
+   "high": 0.006463665994726269,
+   "sentences": 367
+  },
+  "Old value in a passage, base": {
+   "gain": -0.003763362550457061,
+   "low": -0.011047410123467955,
+   "high": 0.004173416425617259,
+   "sentences": 367
+  },
+  "Old value in a passage, v2": {
+   "gain": -0.004477701617156993,
+   "low": -0.006427729064781404,
+   "high": -0.0027051872918266604,
+   "sentences": 367
+  },
+  "FRUIT train, base": {
+   "gain": -0.05690325132244822,
+   "low": -0.06389694218406158,
+   "high": -0.049826832672517425,
+   "sentences": 408
+  },
+  "FRUIT train, v2": {
+   "gain": -0.01522442399150259,
+   "low": -0.019348822299966418,
+   "high": -0.011083593097235226,
+   "sentences": 408
+  }
+ },
+ "reranker": {
+  "test": {
+   "difference": 0.016239807426553954,
+   "low": 0.012725556016318418,
+   "high": 0.019745518359700797
+  },
+  "oracle_sample": {
+   "difference": 0.013961752854281584,
+   "low": 0.008380976816498433,
+   "high": 0.019233221438872232
+  },
+  "editor_minus_rerank": {
+   "difference": 0.04459639871525056,
+   "low": 0.038621172015270315,
+   "high": 0.050461346011938066
+  },
+  "editor_minus_tuned": {
+   "difference": 0.060836206141804516,
+   "low": 0.05502619919604863,
+   "high": 0.06692518944932614
+  },
+  "changed": {
+   "fix-tuned": 0.5790419161676646,
+   "fix-rerank": 0.832934131736527
+  }
+ },
+ "reranked_stress": {
+  "missing": 0.019008515759923444,
+  "oldvalue": -0.007047059319208065,
+  "clean": 0.05047870413857672
+ },
+ "cascade_recall": {
+  "mention": 0.28879310344827586,
+  "staleness_delta": 0.13793103448275862,
+  "edited_as_evidence": 0.7198275862068966,
+  "consequence": 0.7931034482758621
+ },
+ "runs": {
+  "fix-oracle": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.911557719819876,
+   "pool": 0.9559611558775641,
+   "changed": 0.8257485029940119,
+   "sentences": 1670
+  },
+  "fix-oracle-noev": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.8541974822285614,
+   "pool": 0.9160719444116188,
+   "changed": 0.7640718562874251,
+   "sentences": 1670
+  },
+  "fix-predicted": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.8759179133237355,
+   "pool": 0.926145261881944,
+   "changed": 0.8550898203592814,
+   "sentences": 1670
+  },
+  "fix-attention": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.883831890889282,
+   "pool": 0.9317579932673241,
+   "changed": 0.8461077844311378,
+   "sentences": 1670
+  },
+  "fix-tuned": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.9124138168549202,
+   "pool": 0.9523819841877472,
+   "changed": 0.5790419161676646,
+   "sentences": 1670
+  },
+  "fix-rerank": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.9286536242814741,
+   "pool": 0.9523819841877472,
+   "changed": 0.832934131736527,
+   "sentences": 1670
+  },
+  "fix-oracle-tuned": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.940650786418461,
+   "pool": 0.9811654950206699,
+   "changed": 0.6840215439856373,
+   "sentences": 557
+  },
+  "fix-oracle-rerank": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9546125392727426,
+   "pool": 0.9811654950206699,
+   "changed": 0.9748653500897666,
+   "sentences": 557
+  },
+  "abl-no-penalty": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9100362340292129,
+   "pool": 0.9511912943300029,
+   "changed": 0.7414721723518851,
+   "sentences": 557
+  },
+  "abl-no-reject": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9127820154650598,
+   "pool": 0.951962208564226,
+   "changed": 0.6068222621184919,
+   "sentences": 557
+  },
+  "abl-no-veto": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9155727646210376,
+   "pool": 0.9510315394067591,
+   "changed": 0.5511669658886894,
+   "sentences": 557
+  },
+  "abl-no-cap": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9174815090455739,
+   "pool": 0.9561789412438119,
+   "changed": 0.6947935368043088,
+   "sentences": 557
+  },
+  "abl-no-copy": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.91388348307368,
+   "pool": 0.9322798210602139,
+   "changed": 0.5834829443447038,
+   "sentences": 557
+  },
+  "abl-same": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9230246666335606,
+   "pool": 0.9231847535905077,
+   "changed": 0.6391382405745063,
+   "sentences": 557
+  },
+  "abl-pll": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9137500690832361,
+   "pool": 0.9585730646287219,
+   "changed": 0.8096947935368043,
+   "sentences": 557
+  },
+  "abl-verifier": {
+   "copy": 0.8762087128163748,
+   "chosen": 0.9099423863478875,
+   "pool": 0.9572621185375436,
+   "changed": 0.8725314183123878,
+   "sentences": 557
+  },
+  "repair-val2-base": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.889568387383594,
+   "pool": 0.9363340386448858,
+   "changed": 0.8174386920980926,
+   "sentences": 367
+  },
+  "repair-val2-v1": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.9098194982494628,
+   "pool": 0.9344345066542261,
+   "changed": 0.5204359673024523,
+   "sentences": 367
+  },
+  "repair-val2-v2": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.9131540378852433,
+   "pool": 0.955908560945867,
+   "changed": 0.5504087193460491,
+   "sentences": 367
+  },
+  "stress-missing-base": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.8276882569649334,
+   "pool": 0.8861303789395344,
+   "changed": 0.8092643051771117,
+   "sentences": 367
+  },
+  "stress-missing-chosen": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.8830218456142115,
+   "pool": 0.9177467395415059,
+   "changed": 0.40599455040871935,
+   "sentences": 367
+  },
+  "stress-oldvalue-base": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.8783322094156574,
+   "pool": 0.9256445153570897,
+   "changed": 0.8010899182561307,
+   "sentences": 367
+  },
+  "stress-oldvalue-chosen": {
+   "copy": 0.8820955719661144,
+   "chosen": 0.8776178703489574,
+   "pool": 0.8801197820390112,
+   "changed": 0.08991825613079019,
+   "sentences": 367
+  },
+  "editor": {
+   "copy": 0.8747009722749716,
+   "chosen": 0.9732500229967248,
+   "sentences": 1670
+  }
+ }
+}

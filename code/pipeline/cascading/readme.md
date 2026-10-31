@@ -17,10 +17,10 @@ The letters (a) to (c) are the paper's, and edited as evidence, from the progres
 
 ## Data
 
-The synthetic set records each injected cascade as a `{"direct": j, "cascade": k, "kind": ...}` link in the `cascades` field of the record, so labels and training pairs come from these links and no mining or hand labelling is needed. In each link, the correct string of k differs from the fix of j, and the evidence states only j's fix, so k can be repaired only by reasoning from j. The kinds are century, decade, location (a city and its country), demonym, age, duration, gender (a gendered role noun and the subject's pronouns) and field (an occupation and its field), as described in `synthetic/mutators/cascades.py`. One j of the gender and field kinds may have several cascades. Commands run from `code/pipeline`.
+The synthetic set records each injected cascade as a `{"direct": j, "cascade": k, "kind": ...}` link in the `cascades` field of the record, so labels and training pairs come from these links and no mining or hand labelling is needed. In each link, the correct string of k differs from the fix of j, and the evidence states only j's fix, so k can be repaired only by reasoning from j. The kinds are century, decade, location (a city and its country), demonym, age, duration, gender (a gendered role noun and the subject's pronouns) and field (an occupation and its field), as described in `dataset/mutators/cascades.py`. One j of the gender and field kinds may have several cascades. Commands run from `code/pipeline`.
 
 ```bash
-D=../datasets/synthetic/split
+D=../dataset/split
 python -m cascading.links $D/train.jsonl $D --heads-holdout 0.1
 python -m cascading.views $D/train.jsonl $D
 ```
@@ -32,7 +32,7 @@ python -m cascading.views $D/train.jsonl $D
 Hidden states of the three files, then the consequence head and the evaluation of each detector:
 
 ```bash
-D=../datasets/synthetic/split
+D=../dataset/split
 python -m classifier.extract $D/train.jsonl features/cascade/source
 for v in after evidence; do
     python -m classifier.extract $D/$v.jsonl features/cascade/$v --no-tokens

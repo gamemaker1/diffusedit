@@ -1,4 +1,4 @@
-"""UpdateROUGE of infilling runs (Section 9.2), with paired tests over articles.
+"""UpdateROUGE of infilling runs, with paired tests over articles.
 
 UpdateROUGE scores only the sentences an update touched. For one article, let
 U(output) be the output sentences that do not occur verbatim, after whitespace
@@ -20,7 +20,7 @@ construction. The paired tests of infilling.significance compare runs with the
 article as the unit.
 
 Usage:
-    python -m infilling.update_rouge ../datasets/synthetic/split/train.jsonl \\
+    python -m infilling.update_rouge ../dataset/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev predicted=runs/fix-predicted \\
         --pairs oracle:noev oracle:predicted
 """

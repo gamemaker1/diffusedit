@@ -1,8 +1,9 @@
-"""Paired significance tests between infilling runs on the same articles (Section 9.4).
+"""Paired significance tests between infilling runs on the same articles.
 
-Every system is scored on the same repaired sentences, joined by (article id,
-sentence index). "copy" is the unchanged source sentence. A sentence a run did
-not repair counts as copied. Each metric is a ratio of sums over sentences:
+Every system is scored on the same sentences, joined by (article id, sentence
+index): every EDIT sentence of the articles, as in infilling.evaluate, and any
+other sentence some run repaired. "copy" is the unchanged source sentence. A
+sentence a run did not repair counts as copied. Each metric is a ratio of sums over sentences:
 
     rougeL          mean ROUGE-L F1 against the gold rewrite
     precision, recall, new_recall, stale_kept, unsupported
@@ -17,7 +18,7 @@ independent. For a pair (A, B) the statistic is metric(A) - metric(B).
     p_holm   Holm correction over every test of one subset table
 
 Usage:
-    python -m infilling.significance ../datasets/synthetic/split/train.jsonl \\
+    python -m infilling.significance ../dataset/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev predicted=runs/fix-predicted \\
         --pairs oracle:copy oracle:noev predicted:copy oracle:predicted noev:copy
 """
@@ -88,7 +89,8 @@ def collect(data, run_dirs):
         record = records[article_id]
         e = set().union(*(m(f"{s['title']}: {s['text']}") for s in record["evidence"])) if record["evidence"] else set()
         evidence_words = words(" ".join(f"{s['title']} {s['text']}" for s in record["evidence"]))
-        repaired = sorted({edit["sentence"] for r in runs.values() for edit in r[article_id]["edits"]})
+        repaired = sorted({j for j, entry in enumerate(record["labels"]) if entry.get("label") == "EDIT"}
+                          | {edit["sentence"] for r in runs.values() for edit in r[article_id]["edits"]})
         for j in repaired:
             target = gold(record, j)
             source = record["source_sentences"][j].strip()

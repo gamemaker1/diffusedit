@@ -1,4 +1,4 @@
-"""LLaDA infilling sampler with low-confidence remasking (Section 2.2).
+"""LLaDA infilling sampler with low-confidence remasking.
 
 Only the given positions are masked. Each step runs one forward pass,
 predicts every still-masked position, and commits the predictions the model

@@ -1,10 +1,10 @@
-"""Mention extractor M(text) — Section 7.3.
+"""Mention extractor M(text): named entities and numbers of a text.
 
 Returns a set of lowercased mention strings from a piece of text:
   - Named entities of 13 types (spaCy en_core_web_sm)
   - Every digit string (numbers, years, statistics)
 
-This is the same extractor used in infilling.entities and datasets/collate.py.
+This is the same extractor used in infilling.entities and dataset/fruit/collate.py.
 Centralised here so cascade detection, mining, and evaluation all share one
 implementation.
 

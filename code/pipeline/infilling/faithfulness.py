@@ -1,4 +1,4 @@
-"""AlignScore of a run's updated sentences against the evidence (Section 9.2).
+"""AlignScore of a run's updated sentences against the evidence.
 
 For one article, U(output) is the output sentences that do not occur
 verbatim, after whitespace normalization, in the source article. AlignScore
@@ -20,7 +20,7 @@ article, with a null score when U(output) is empty. A rerun resumes after
 the last article.
 
 Usage:
-    python -m infilling.faithfulness runs/fix-oracle ../datasets/synthetic/split/train.jsonl \\
+    python -m infilling.faithfulness runs/fix-oracle ../dataset/split/train.jsonl \\
         --ckpt checkpoints/AlignScore-large.ckpt
 """
 

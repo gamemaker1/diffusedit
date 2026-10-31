@@ -1,14 +1,9 @@
-"""Cache mean-pooled LLaDA hidden states for every EVIDENCE snippet (not
-sentences -- see classifier.extract for that), for the evidence-augmented
-classifier experiment (experiments/evidence_train.py).
+"""Cache mean-pooled LLaDA hidden states for every evidence snippet, for the
+evidence-augmented sentence classifier of experiments.evidence_train.
 
-Self-contained: imports classifier.inputs.build / classifier.extract's model
-utilities but modifies neither file. This means a SECOND forward pass over
-the same articles classifier.extract already processed -- real, duplicated
-GPU time, accepted here specifically to avoid touching classifier/extract.py
-or classifier/inputs.py while Vedant is actively iterating on them. Once this
-experiment is validated, folding evidence pooling into his single pass
-(like the token scorer eventually was) is the efficient long-term fix.
+This is a second forward pass over the articles that classifier.extract
+already processed, kept separate so that the extraction of the sentence
+states stays unchanged.
 
 Evidence spans are recomputed locally (evidence_spans_and_ids below),
 replicating classifier.inputs.evidence_ids's exact tokenization + truncation
@@ -26,7 +21,7 @@ Output directory:
     progress.json         articles and rows written so far. A rerun resumes here.
 
 Usage:
-    python -m experiments.evidence_extract ../datasets/synthetic/split/train.jsonl evidence_features/train
+    python -m experiments.evidence_extract ../dataset/split/train.jsonl evidence_features/train
 """
 
 import argparse

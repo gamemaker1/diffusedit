@@ -1,14 +1,10 @@
-"""Sentence classifier augmented with evidence features (team's Approach A).
+"""Sentence classifier with an evidence summary concatenated to the sentence state.
 
-Same 3-way KEEP/EDIT/DROP head as classifier.train, but each sentence's
-feature vector is [pooled sentence vector ; mean-pooled evidence vector for
-that article] instead of just the sentence vector alone -- testing whether
-giving the classifier explicit access to evidence (beyond whatever the
-sentence's own hidden state already picked up via attention) helps.
-Evidence is mean-pooled across all of an article's snippets rather than kept
-as separate per-snippet features, since the snippet count varies per
-article and there's no way yet to know which snippet is most relevant --
-exactly the "let the model learn" approach the team discussed.
+The classifier is the same three-way linear layer as classifier.train, but
+its input is the sentence vector followed by a summary of the article's
+evidence: the mean of the evidence snippet states, the state of the nearest
+snippet, or a learned attention over the snippets. It tests whether an
+explicit evidence summary helps beyond what the sentence state already holds.
 
 Needs experiments.evidence_extract's output in addition to
 classifier.extract's normal output (same articles, same order, same split).
@@ -27,11 +23,17 @@ number.
                head train together.
 
 --test is scored once with the tau_d tuned on val (or on the held-out train
-articles without --val) and reported under "test".
+articles without --val) and reported under "test". --save-predictions also
+writes the test probabilities to test_predictions.npz, with the fields of
+classifier.train's file (rows, article, probs, labels, tau_d). Both read the
+first progress.json["rows"] sentences of the test directory in row order, so
+the two files pair sentence by sentence for analysis.classifier_tests.
 
 Usage:
     python -m experiments.evidence_train --train features/train --layer 24 \
         --evidence-pool attention --out heads/evidence_attention_layer24
+    python -m experiments.evidence_train --train features/train --val features/val --test features/test \
+        --layer 24 --evidence-pool mean --save-predictions --out heads/evidence_mean/layer24
     python -m experiments.evidence_train \
         --train features/train \
         --val features/val \
@@ -238,17 +240,25 @@ def train_attention(args, device):
                "holdout": None if args.val else args.holdout, "seed": args.seed,
                "val": scores(y_held, decide(held_probs, tau)),
                "mean_peak_attention": peak.mean().item(), "max_snippets": train.index.shape[1]}
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
     if args.test:
         test = Snippets(args.test, args.layer, args.max_snippets)
         test_probs, _ = probs_of(model, test, torch.arange(len(test.y)))
         metrics["test"] = scores(test.y, decide(test_probs, tau))
         print(f"test macro-F1 {metrics['test']['macro_f1']:.4f}")
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+        if args.save_predictions:
+            save_predictions(out, test_probs, test.y, test.article, tau)
     torch.save({"state_dict": model.state_dict(), "sentence_mean": s_mean.cpu(), "sentence_std": s_std.cpu(),
                 "evidence_mean": e_mean.cpu(), "evidence_std": e_std.cpu(), "layer": args.layer,
                 "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+
+def save_predictions(out, probs, y, article, tau):
+    """test_predictions.npz in the layout of classifier.train, one row per test sentence in row order."""
+    np.savez_compressed(out / "test_predictions.npz", rows=np.arange(len(y)), article=article,
+                        probs=probs.numpy().astype(np.float32), labels=y.numpy().astype(np.int8), tau_d=tau)
 
 
 @torch.no_grad()
@@ -278,6 +288,8 @@ def main():
     parser.add_argument("--evidence-pool", choices=["mean", "nearest", "attention"], default="mean")
     parser.add_argument("--attention-hidden", type=int, default=256, help="query/key width for --evidence-pool attention")
     parser.add_argument("--max-snippets", type=int, default=32, help="snippets per article for --evidence-pool attention")
+    parser.add_argument("--save-predictions", action="store_true",
+                        help="write the test probabilities to test_predictions.npz")
     args = parser.parse_args()
     if args.evidence_pool == "attention" and args.eval:
         parser.error("--evidence-pool attention takes --val and --test, not --eval")
@@ -346,8 +358,9 @@ def main():
     metrics = {"layer": args.layer, "evidence_pool": args.evidence_pool, "tau_d": tau, "tau_sweep": sweep,
                "val": scores(y_val, decide(val_probs, tau)), "feature_dim": x_train.shape[1]}
     if args.test:
-        x, y, _ = build_features(args.test, args.layer, args.evidence_pool)
-        metrics["test"] = scores(y, decide(predict(head, x, mean, std, device), tau))
+        x, y_test, test_article = build_features(args.test, args.layer, args.evidence_pool)
+        test_probs = predict(head, x, mean, std, device)
+        metrics["test"] = scores(y_test, decide(test_probs, tau))
         print(f"test macro-F1 {metrics['test']['macro_f1']:.4f}")
     for directory in args.eval:
         x, y, _ = build_features(directory, args.layer, args.evidence_pool)
@@ -361,6 +374,8 @@ def main():
     torch.save({"state_dict": head.state_dict(), "mean": mean.cpu(), "std": std.cpu(),
                 "layer": args.layer, "tau_d": tau}, out / "head.pt")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    if args.test and args.save_predictions:
+        save_predictions(out, test_probs, y_test, test_article, tau)
 
 
 if __name__ == "__main__":

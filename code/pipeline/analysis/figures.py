@@ -14,7 +14,7 @@ keeps the internal full-width layout and goes in a figure* float.
     stale_tokens.pdf   per-token scores in two held-out sentences (full width)
 
 Usage:
-    python -m analysis.figures --data ../datasets/collated/train.jsonl --datasets ../datasets \\
+    python -m analysis.figures --data ../dataset/collated/train.jsonl --datasets ../dataset \\
         --outputs outputs/jl --out ../../docs/progress/figures
 """
 

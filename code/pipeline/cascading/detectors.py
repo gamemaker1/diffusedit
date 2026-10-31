@@ -1,4 +1,4 @@
-"""Four cascade detectors — Section 7.3 and progress report.
+"""The cascade detectors of the loop.
 
 After infilling round r, each detector flags sentences outside Δ_r that may
 have been broken by the repairs. Flagged sentences enter the next round as

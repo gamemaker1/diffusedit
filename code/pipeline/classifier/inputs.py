@@ -8,7 +8,7 @@ Every EDIT sentence also gets one stale label per token (Section 8.4). A token
 is stale when its character range overlaps a stale span of the label.
 
 Check spans and stale tokens against a split:
-    python -m classifier.inputs ../datasets/synthetic/split/train.jsonl --n 50
+    python -m classifier.inputs ../dataset/split/train.jsonl --n 50
 """
 
 import argparse

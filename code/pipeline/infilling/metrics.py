@@ -1,4 +1,4 @@
-"""Article-level metrics of Section 9.2 for any system's output, with paired tests.
+"""Article-level metrics for any system's output, with paired tests.
 
 A system is a directory with results.jsonl, one {"id", "output"} line per
 article, where "output" is the list of output sentences. infilling.run writes
@@ -60,7 +60,7 @@ The token-level detection metrics of Section 9.2 come from classifier.train
 and staleness.train with --eval.
 
 Usage:
-    python -m infilling.metrics ../datasets/synthetic/split/train.jsonl \\
+    python -m infilling.metrics ../dataset/split/train.jsonl \\
         oracle=runs/fix-oracle noev=runs/fix-oracle-noev \\
         --pairs oracle:copy oracle:noev --out runs/metrics.json
 """

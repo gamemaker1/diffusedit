@@ -22,8 +22,8 @@ set is orange in every figure.
 The numbers the report quotes go to <outputs>/synthetic/analysis.json.
 
 Usage:
-    python -m analysis.synthetic --fruit ../datasets/collated/train.jsonl \\
-        --synthetic ../datasets/synthetic/train.jsonl --outputs outputs/jl \\
+    python -m analysis.synthetic --fruit ../dataset/collated/train.jsonl \\
+        --synthetic ../dataset/split/train.jsonl --outputs outputs/jl \\
         --out ../../docs/internal/experiments/synthetic/figures
 """
 
@@ -142,7 +142,7 @@ def data(stats, out):
 
 
 def read_probe(path):
-    """Macro-F1 per feature set from the output of datasets/synthetic/probe.py, FRUIT sample first."""
+    """Macro-F1 per feature set from the output of dataset/probe.py, FRUIT sample first."""
     blocks = re.split(r"^== ", Path(path).read_text(), flags=re.M)[1:]
     result = {}
     for (key, _, _), block in zip(SETS, blocks):
@@ -643,7 +643,7 @@ def main():
     parser.add_argument("--synthetic", required=True, help="synthetic train.jsonl")
     parser.add_argument("--outputs", default="outputs/jl")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--probe", help="output of datasets/synthetic/probe.py on a FRUIT sample, then the synthetic set")
+    parser.add_argument("--probe", help="output of dataset/probe.py on a FRUIT sample, then the synthetic set")
     args = parser.parse_args()
     outputs, out = Path(args.outputs), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

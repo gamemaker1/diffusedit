@@ -1,0 +1,23 @@
+\begin{tikzpicture}[
+  node distance=4mm and 5mm,
+  box/.style={draw, rounded corners=2pt, align=center, font=\footnotesize, minimum height=8mm, inner sep=3pt},
+  head/.style={box, fill=black!8},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\node[box] (in) {Evidence $E$\\ + article $A$};
+\node[box, right=of in] (llada) {LLaDA-8B\\ forward pass};
+\node[head, right=of llada, yshift=6mm] (cls) {Sentence\\ classifier};
+\node[head, below=of cls] (stale) {Staleness\\ head};
+\node[box, right=of stale] (mask) {Masking\\ policy, $\tau$};
+\node[box, right=of mask] (fill) {Infill at\\ 4 lengths};
+\node[box, right=of fill] (rank) {Rerank\\ PLL + Ent};
+\node[head, above=of rank] (casc) {Cascade\\ detector};
+\draw[arr] (in) -- (llada);
+\draw[arr] (llada.east) -- ++(2mm,0) |- (cls.west);
+\draw[arr] (llada.east) -- ++(2mm,0) |- (stale.west);
+\draw[arr] (cls.east) -| node[pos=0.25, above, font=\scriptsize] {\edit{}} (mask.north);
+\draw[arr] (stale) -- (mask);
+\draw[arr] (mask) -- (fill);
+\draw[arr] (fill) -- (rank);
+\draw[arr] (rank) -- node[right, font=\scriptsize] {repaired $A$} (casc);
+\draw[arr] (casc.north) -- ++(0,3mm) -| node[pos=0.25, above, font=\scriptsize] {flagged sentences, next round} (llada.north);
+\end{tikzpicture}

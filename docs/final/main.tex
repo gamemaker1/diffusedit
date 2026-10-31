@@ -1,0 +1,533 @@
+\documentclass[11pt]{article}
+
+\usepackage[preprint]{acl}
+
+\usepackage{times}
+\usepackage{latexsym}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{multirow}
+\usepackage{float}
+\usetikzlibrary{positioning,arrows.meta}
+\definecolor{pastelblue}{HTML}{8FB8E8}
+\definecolor{pastelorange}{HTML}{F4A582}
+\definecolor{pastelgreen}{HTML}{A8DCB4}
+\definecolor{pastelgray}{HTML}{CFD4D9}
+
+\newcommand{\mask}{\ensuremath{\mathrm{m}}}
+\newcommand{\keep}{\textsc{keep}}
+\newcommand{\edit}{\textsc{edit}}
+\newcommand{\drop}{\textsc{drop}}
+\newcommand{\maskdisc}{\textsc{[mask]-disc}}
+\newcommand{\Tau}{\mathrm{T}}
+
+\title{DiffusEdit: Final Submission \\ Team Wordsmiths}
+
+\author{
+  \textbf{Tatva Agarwal\textsuperscript{*}} \\ 2024117005 \And
+  \textbf{Vedant Kulkarni\textsuperscript{*\dag}} \\ 2024101140 \And
+  \textbf{Bysani Vedavyas\textsuperscript{*}} \\ 2024101025 \And
+  \textbf{Venya Velmurugan\textsuperscript{*}} \\ 2024114002
+}
+
+\begin{document}
+
+\maketitle
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\footnotetext[1]{Equal contribution; authors listed alphabetically.}
+\footnotetext[2]{Correspondence to \texttt{\scriptsize vedant.kulkarni@students.iiit.ac.in}.}
+\renewcommand{\thefootnote}{\arabic{footnote}}
+\setcounter{footnote}{0}
+
+\begin{abstract}
+Reference articles go out of date as events develop, and updating them by hand is slow. Regenerating the article with a fine-tuned language model automates the update, but trains every parameter of the model and leaves no record of which tokens changed. DiffusEdit instead edits the article in place. Small trained networks, called classifiers, read the hidden states of a frozen masked diffusion language model and decide which sentences to keep, edit or delete, and which tokens inside them are stale. The frozen model rewrites only the stale positions, and the system repeats the process on sentences that the rewrites themselves made wrong. Training labels come from Wiki Wrong, a synthetic benchmark of Wikipedia leads with known edits, and evaluation measures update quality, minimality, and coverage of the cascading edits.\footnote{\scriptsize\url{https://github.com/gamemaker1/diffusedit}}\footnote{\scriptsize\url{https://huggingface.co/datasets/gamemaker1/wiki-wrong}}\footnote{\scriptsize\url{https://huggingface.co/gamemaker1/diffusedit}}\footnote{\scriptsize\url{https://huggingface.co/gamemaker1/t5edit}}
+\end{abstract}
+
+\section{Introduction}
+Reference text goes out of date. A Wikipedia article about a factory fire may say that three people died and that the small death toll limited the political fallout. A week later, news reports revise the toll to forty-two. The first sentence is contradicted directly, but the second is wrong because the fact it follows from no longer holds. We call the second kind of required change a \emph{cascading edit}, a sentence that must change only because another sentence changed.
+
+DiffusEdit updates the article in place. It is built on a masked diffusion language model, a model that is trained to predict masked tokens from the unmasked text on both sides of them and that generates text by filling masks over several steps, so it can rewrite a span in the middle of a sentence while the rest stays fixed. The model is never trained here. Instead, small trained networks, called \emph{classifiers}, read the vectors that the frozen model computes for each token, its hidden states, and choose the stale sentences and tokens. The model infills only those positions, and the loop repeats on sentences the repairs themselves broke. On the fire example, round one masks \emph{three} and infills \emph{forty-two}, and round two rewrites the fallout sentence the first repair left unsupported.
+    
+\section{Task Definition}
+\label{sec:problem}
+
+An article is a sequence of sentences $A = (s_1, \dots, s_n)$, new evidence arrives as a set of text snippets $E = (e_1, \dots, e_m)$, and the system must produce an updated article $\hat{A}$ from the two alone. Faithfulness requires every claim in $\hat{A}$ to agree with the evidence and the untouched parts of the article, coverage requires every evidence fact that bears on the article to appear in $\hat{A}$, and minimality requires $\hat{A}$ to stay close to $A$.
+
+\section{Related Work}
+\label{sec:related}
+
+Early evidence-driven correction handles one sentence or claim at a time, masks the tokens that a new fact contradicts and refills them \citep{shah-etal-2020-automatic, thorne-vlachos-2021-evidence}. Closest to us, FRUIT \citep{iv-etal-2022-fruit} defines the task this project works on, and its EDIT5 model writes the updated article left to right while copying unchanged sentences through special tokens.
+
+EditPropBench \citep{kruthof-2026-editpropbench} measures how many required downstream changes a model finds after a planted edit, and the strongest prompted model tested misses about 30\% of them.
+
+\citet{malmi-etal-2019-encode} edit text by tagging each token to keep it, delete it or add a phrase before it. \citet{iso-etal-2020-fact} revise a document to match facts given as triples. \citet{spangher-etal-2022-newsedits} release a corpus of news article revisions, from which \citet{panthaplackel-etal-2022-updated} update the title of a news article when the article changes. RARR \citep{gao-etal-2023-rarr} finds evidence for a model's output and revises its unsupported claims, GenAudit \citep{krishna-etal-2024-genaudit} revises or removes the claims of a response that a reference document does not support, and PEER \citep{schick-etal-2022-peer} is trained to draft, edit and explain its edits.
+
+In diffusion decoding over masked diffusion language models such as LLaDA \citep{nie-etal-2025-llada} and Dream \citep{ye-etal-2025-dream}, several works reconsider tokens the sampler already committed \citep{wang-etal-2025-remasking, bie-etal-2026-llada21}. Detect, Remask, Repair \citep[DRR;][]{zou-etal-2026-detect} is a prior system that applies a diffusion model to existing text and external evidence. It scores each token of a stale summary with \maskdisc{}, a linear classification layer over the diffusion model's hidden states, then masks and infills the highest-scoring tokens, re-scoring the summary over several rounds. Our work extends this system.
+
+\section{Motivation}
+\label{sec:motivation}
+
+\emph{Cascades are not modeled.} DRR detects tokens that clash with the evidence, on summaries of about ninety tokens. A cascading edit clashes only with another sentence that changed, so scoring against the evidence has no signal for it, and nothing in the design tracks which sentences depend on which.
+
+\emph{Infilling cannot delete.} Every mask must be filled by exactly one token, so a system built on infilling alone can rewrite a sentence but never remove it.
+
+\emph{No token-level supervision exists.} FRUIT-WIKI pairs outdated and updated articles without labeling which tokens went stale, and DRR trains on short synthetic summaries, so article-scale training data must be derived.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/system.pdf}
+\caption{One round of DiffusEdit on the fire example. Orange marks the token the staleness classifier scores as stale, green the value the evidence supplies, and blue the sentence the consequence classifier flags for the next round.}
+\label{fig:pipeline}
+\end{figure*}
+
+\section{Methodology}
+\label{sec:method}
+
+DiffusEdit repairs an article in rounds (Figure~\ref{fig:pipeline}). In each round the frozen model runs once over the evidence and the article, the classifiers label the sentences to change and the stale tokens in them, the model fills in only those tokens to give several candidate sentences, a ranker picks one, and a cascade detector flags the sentences that the repairs may have broken, which become the next round. Table~\ref{tab:choices} in the appendix lists the fixed values of the method and the reason for each.
+
+\subsection{Shared Forward Pass}
+The input is the evidence passages followed by the article. LLaDA-8B-Base \citep{nie-etal-2025-llada} runs once over this sequence with no mask. Because it reads in both directions, the state of every token reflects the whole sequence, evidence included. We keep the \emph{hidden state} of every token at every block, meaning the vector that the model computes for that token at that block (4,096 numbers). The classifiers read the states of the article tokens, and the staleness classifier also reads the states of the evidence tokens. One pass serves all classifiers, which are trained on these states while LLaDA's weights stay fixed. For a sentence $s_j$ with token positions $I_j$, the sentence vector is the mean of its token states at block $b$:
+\begin{equation}
+u_j^{(b)} = \frac{1}{|I_j|}\sum_{i \in I_j} h_i^{(b)}.
+\end{equation}
+
+\subsection{Sentence Classifier}
+The sentence classifier labels every article sentence \keep{}, \edit{} or \drop{}. It is a linear layer on the sentence vector at block 24 of the 32 blocks,
+\begin{equation}
+p_j = \mathrm{softmax}\big(W\,u_j^{(24)} + b\big),
+\end{equation}
+trained with cross-entropy on the train split, and the label with the highest probability is taken. Block 24 is used because its validation macro-F1 is higher than that of block 32. A \keep{} sentence is left alone, an \edit{} sentence goes on to token scoring, and a \drop{} sentence is deleted.
+
+\subsection{Token Staleness Classifier}
+For each token of an \edit{} sentence, the staleness classifier, which reads block 32, outputs $\pi_i \in [0,1]$, the probability that the token is stale. A token is stale only relative to the evidence. Its state already reflects the evidence, but a linear classifier must read that out of a single vector. Our classifier instead compares the token with the evidence states through a learned attention over the evidence tokens and one extra \emph{null} slot, a learned key and value that stand for no evidence, added so that a token the evidence does not mention has somewhere to place its weight. Section~\ref{sec:focus} measures where the weight falls and finds the slot unused. The attention output $o_i$ and the token state $h_i$ pass through a small feed-forward layer to one score:
+\begin{equation}
+\pi_i = \sigma\big(\mathrm{FFN}([\,h_i;\, o_i\,])\big).
+\end{equation}
+This extends \maskdisc{} \citep{zou-etal-2026-detect}, which scores tokens with a linear layer. The classifier is trained with binary cross-entropy on the derived stale tokens of the train split, which are the tokens of the words that the word-level difference between the source and the gold sentence marks as changed.
+
+\subsection{Masking Policy}
+The masking policy turns the token scores of an \edit{} sentence into masks. Tokens with $\pi_i \ge \tau$ are masked, with $\tau = 0.85$:
+\begin{equation}
+M = \{\, i : \pi_i \ge \tau \,\}.
+\end{equation}
+If $M$ is empty, the classifier's \edit{} label is trusted and the top fifth of the sentence by score is masked. If $M$ covers more than half of the sentence, only the highest-scoring half is kept, because such a sentence is closer to a rewrite than a repair. A single unmasked token between two masked tokens is masked too, so that a fragmented score gives one region to rewrite, and each masked token is widened to its whole word.
+
+Runs of adjacent masks form \emph{spans}. A token can be masked at most three times over all rounds, which is the re-masking cap of \citet{yao-2026-remask} and stops the loop from masking the same span forever.
+
+\subsection{Variable-Length Infilling}
+A masked diffusion model fills every mask with exactly one token, so a span of $n$ masks gives $n$ tokens, but a correct update can be shorter, longer or empty. Models that let the masked region grow or shrink exist \citep{wu-etal-2026-dreamon, zhang-etal-2025-ddot}, but they need the diffusion model to be trained, and ours stays frozen. We therefore fill each span at four lengths,
+\begin{equation}
+\Lambda(n) = \{\,0,\ \lceil n/2\rceil,\ n,\ n+2\,\},
+\end{equation}
+which delete, shorten, keep and lengthen it. At each length LLaDA fills the masks greedily in 8 steps, with the whole evidence and article as context. Every filled sentence is a \emph{candidate}, and the candidates of one sentence form its \emph{pool}.
+
+Spans are decided one at a time from left to right, each candidate length sampled with the later spans masked at their own length, so every candidate is a whole sentence. A sampled fill can only hold words the model finds probable, so each span also gets four \emph{evidence-copy} candidates, named entities of the evidence that the sentence lacks and that have the entity type of the masked text, the four with the highest mean log-probability under LLaDA in the span.
+
+\subsection{Infilling Rules}
+The four rules below and the evidence-copy candidates together are the \emph{infilling rules}. The setting that uses them is called \emph{with infilling rules}, and the setting without them \emph{without infilling rules}.
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+    \item \textbf{Edit penalty.} A candidate loses $0.1$ times its word edit distance from the sentence before repair, so that it is charged for every changed word \citep{chen-etal-2022-converge}.
+    \item \textbf{Rejection rule.} A candidate loses $100$ if it adds a capitalised word or a number found in neither the evidence nor the sentence before repair. If every candidate is rejected, the best of them still wins.
+    \item \textbf{Evidence veto.} A span whose words all occur somewhere in the evidence is unmasked, because the evidence does not contradict it.
+    \item \textbf{Span cap.} A sentence whose mask has more than two spans is left unrepaired, because such masks were mostly wrong.
+\end{itemize}
+
+\subsection{Ranking}
+\paragraph{Heuristic ranking}
+The heuristic ranking combines a fluency score and an agreement score. The pseudo-log-likelihood (PLL) measures fluency. It is the mean log-probability that LLaDA gives each token of the sentence when that token alone is masked. $\mathrm{Ent}$ measures agreement with the evidence. It is the probability that a VitaminC fact verifier \citep{schuster-etal-2021-vitaminc} gives to the best evidence passage supporting the sentence. A candidate $c$ with sentence $s_c$ scores
+    \begin{equation}
+    \begin{aligned}
+    \mathcal{R}(c) = &\; 0.5\,\mathrm{PLL}(s_c) + 0.5\,\mathrm{Ent}(s_c) \\
+                     &- 0.1\,d(s_c, s) - 100\,[\mathrm{rej}(c)]
+    \end{aligned}
+  	\end{equation}
+where $d$ is the word edit distance to the sentence $s$ before repair, and $[\mathrm{rej}(c)]$ is $1$ if the candidate is rejected and $0$ otherwise. A deletion wins only when its score is at least $0.1$ above the best rewrite, because removing a span also removes the claim that the verifier would have checked.
+
+In a pool where every sampled fill adds a place name that the evidence does not hold, the rejection rule removes them all and the deletion wins.
+
+\paragraph{Learned ranking}
+The learned ranking replaces the heuristic score with a gradient-boosted tree classifier, as one fixed formula did not cover all cases. Every candidate is a whole sentence, so the logged pools can be ranked again without another model pass. Each candidate gets its PLL and Ent scores with their ranks in the pool, the ratio of its fill length to the span length, its word edit distance and ROUGE-L to the source, the counts of capitalised words and numbers it adds or drops, split by whether the evidence holds them, and the sampler's confidence. The unchanged source joins every pool as one more candidate, so the ranking can leave a sentence as it is. The classifier is fit on the pools of the validation articles to predict whether a candidate has the best ROUGE-L of its pool, and the candidate with the highest predicted probability is the output.
+
+In a pool where the sampled fill reproduces a stale name with the highest PLL, the heuristic ranking keeps the name and the learned ranking picks the evidence copy that equals the gold update.
+
+\subsection{Rounds and Cascades}
+A repair can make another sentence stale. If a birth date changes, a sentence that states an age is now wrong, although nothing in the evidence mentions it. We call such a sentence a \emph{cascade} sentence. After each round a cascade detector flags sentences outside the repaired set, and the next round repairs them. The loop runs at most three rounds, and every round starts with a fresh forward pass, because the repairs changed the text that the old states describe. A loop with no detector stops after one round.
+
+\paragraph{Consequence classifier}
+A small trained network scores whether a sentence $s_k$ must change because the repaired sentence $s_j$ did. It reads the pooled states at block 32 of $s_j$ after its repair and of $s_k$ before it, and flags the pair when the score exceeds $\tau_c = 0.35$:
+\begin{equation}
+g_{jk} = \sigma\big(\mathrm{MLP}([\,u_j;\ u_k;\ u_j \odot u_k;\ |u_j - u_k|\,])\big).
+\label{eq:consequence}
+\end{equation}
+The product and the absolute difference give the network similarity signals that it would otherwise have to learn.
+
+\paragraph{Staleness delta}
+This flags a sentence whose staleness scores rise after the round.
+
+\paragraph{Edited as evidence}
+This appends the repaired sentences to the evidence, so that the next pass covers them, and flags the sentences that the classifier then labels \edit{}.
+
+
+
+\section{Data}
+\label{sec:data}
+
+\subsection{FRUIT}
+FRUIT-WIKI \citep{iv-etal-2022-fruit} pairs two snapshots of a Wikipedia article and marks the sentences that changed between them, so a sentence reworded without a change of fact carries the same \edit{} label as one whose value changed. Three co-authors labelled a random sample of 100 sentences from 23 articles, drawn from a 436-sentence sheet of 100 training articles, as \keep{} or \edit{} from the two snapshots. Of the 99 sentences with a majority verdict, 13 carried a wrong label, a 95\% Wilson interval of 7.8\% to 21.2\%. All 13 were \edit{} labels that every annotator judged \keep{}, and 8 of the 99 sentences (8.1\%) were rewordings that changed no factual claim. A classifier trained on these labels is trained to call a rewording stale, so FRUIT was replaced by Wiki Wrong, a synthetic benchmark in which every \edit{} changes a value and the stale tokens are known.
+
+\subsection{Wiki Wrong}
+\label{sec:synthetic}
+Wiki Wrong starts from 30,000 English Wikipedia leads, one article per record. In each lead a sentence is chosen for an edit with probability 0.35 and for a deletion with probability 0.10, independently of the other sentences, so that the position of a sentence carries no information about its label. After the checks below, 29\% of the sentences are \edit{} and 7\% \drop{}, against 42\% and 12\% in the collated FRUIT training split. An edited sentence has one to three values replaced, so that a sentence can have more than one stale span: a named entity by an entity of the same type and shape drawn from other articles, so that the replacement reads as naturally as the original, and a year or an integer by a nearby one, so that the change is not visible from the magnitude alone. With probability 0.25 an edit also receives a cascade, a second sentence whose value follows from the first, such as a century from a year, an age from a birth date, a demonym from a country, or pronouns from a name.
+
+Evidence passages are written by Claude Sonnet agents from a fixed brief, as excerpts of other documents such as news reports and reference entries, and an article is kept only if every new value of a direct edit occurs in a passage about that sentence, no passage holds an old value, every deleted sentence has a passage that retracts it, no passage copies seven consecutive words of a sentence, so that a string match between the passage and the article cannot stand in for reading the evidence, and no passage supports a cascade sentence, so that a cascade can be found only through the sentence it depends on. The sentence labels, the stale spans and the gold rewrites follow from the construction, so the label noise of FRUIT is absent.
+
+LLaDA-8B-Base has read Wikipedia in pretraining, so a lead with a wrong value clashes with what its weights hold, and a classifier or an infilling run can find the stale text without the evidence. The direction of every edit is therefore reversed. The real Wikipedia sentence is the outdated source, the mutated sentence is the gold update, and the evidence states the mutated values. A model that reproduces a memorised fact is wrong under the reversal, and the gold update can be reached only through the evidence.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Split} & \textbf{Articles} & \keep{} & \edit{} & \drop{} & \textbf{Linked} \\
+\midrule
+Train & 12,180 & 27,061 & 12,360 & 3,062 & 1,589 \\
+Validation & 1,564 & 3,472 & 1,575 & 414 & 198 \\
+Test & 1,602 & 3,500 & 1,684 & 428 & 220 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Articles, sentence labels and articles with a cascade link per split.}
+\label{tab:splits}
+\end{table}
+
+Table~\ref{tab:splits} lists the splits. The classifiers are fit on the training split, every threshold and every design choice is set on the validation split, and the test split is scored once per configuration. Sentence-level results are reported on all 1,670 \edit{} sentences of the 901 test articles that have at least one supported \edit{} sentence, meaning one whose gold rewrite adds no word that is absent from both the evidence and the source sentence; 1,420 of the 1,670 are supported themselves. The repair step was run on test twice: once without the infilling rules, whose score motivated the rules, which were then designed on 200 validation articles and selected on a disjoint 200, and once with them. The rule ablations run on a seeded sample of 300 of the 901 articles, and the loop ablations on a seeded sample of 300 of the 1,602 test articles, because a full run of the repair step over the 901 articles takes over two hours on the one NVIDIA A100 with 40~GB of memory that every run uses. LLaDA-8B-Base runs in bfloat16 and is never trained, and the classifiers together hold 12.9M parameters and train in 12 minutes on cached hidden states.
+
+\subsection{Baselines and Controls}
+Copying the source unchanged is the floor that every system must beat. The single round stops after the first round with no cascade detector, which is the single-pass setting of DRR \citep{zou-etal-2026-detect}, so the difference to the full loop is the effect of the extra rounds. Every loop and article-level result uses the heuristic ranking, because the learned ranking was fit on logged pools after the loops had run. The Flan-T5 editor is \texttt{flan-t5-large}, 780M parameters, fine-tuned end to end on the 12,180 training articles to write the updated article from the outdated article and the evidence in the format of EDIT5 \citep{iv-etal-2022-fruit}, and it bounds what a trained generator reaches on the same data. Oracle masks give the infilling step the gold stale tokens, so the gap to the predicted masks is the cost of the staleness classifier. Gold sentence labels given to the loop bound what better labels and detection together could add.
+
+\subsection{Metrics}
+Sentence-level scores compare the output sentence with the gold rewrite by ROUGE-L F1. Exact match counts outputs equal to the gold rewrite after case and whitespace normalisation. New-value recall is the share of new values that occur in the output as whole words, and old-value kept is the share of old values that still occur, over old values absent from the gold update, so a lower value is better. Verifier support is the probability of SUPPORTS that the VitaminC verifier of the ranking step gives the output sentence against its best evidence passage, a check against the evidence rather than against the gold rewrite.
+
+Article-level scores compare whole articles. UpdateROUGE-L \citep{iv-etal-2022-fruit} is ROUGE-L between the sentences of the output and of the gold article that differ from the source. \keep{} verbatim is the share of gold \keep{} sentences that appear unchanged in the output. Entity precision and recall compare the mentions, meaning named entities and numbers, of the output sentences that differ from the source with the mentions of the gold update's changed sentences. Unsupported is the count per article of output mentions that occur in neither the source article nor the evidence. Cascade ROUGE-L is UpdateROUGE-L restricted to the cascade sentences. Cascade recall is measured outside the loop: the direct edits of an article are repaired with their gold rewrites, and the recall is the share of cascade sentences that the detector then flags. The classifiers are scored with macro-F1, the mean over the three sentence labels of the harmonic mean of precision and recall, with the area under the precision-recall curve (PR-AUC) for the token labels, whose positive share is 11\%, and with the area under the receiver operating curve (AUROC), the probability that a cascade pair scores above a non-cascade pair, for the consequence pairs. Every interval is a 95\% bootstrap interval over articles, from at least 2,000 resamples of the articles with replacement.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Classifiers}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/evidence.pdf}
+\caption{Each classifier on the test split with its evidence and without it.}
+\label{fig:evidence}
+\end{figure}
+
+Figure~\ref{fig:evidence} holds the test scores. A linear classifier over the hidden states of the diffusion model separates the three sentence labels far better than the same classifier over sentence-transformer embeddings of the sentence and the evidence, which reaches 0.491 macro-F1, so the states of the frozen model carry most of the signal. For tokens, the attention staleness classifier that compares each token with the evidence states beats a linear classifier on the token state alone. Retrained on states of the article alone, the sentence classifier falls to 0.335 and the linear staleness classifier to 0.349 PR-AUC, three times the positive share of 0.113, and the attention staleness classifier scored with its evidence slots emptied keeps 0.718 of its 0.831, so the token state alone carries part of the signal and the evidence the rest. The consequence classifier reaches 0.931 AUROC on the test pairs.
+
+Over five training seeds the standard deviation of every classifier's test score is a few thousandths, too small to see at the scale of Figure~\ref{fig:evidence}, so the gaps between classifiers are far outside the seed variation.
+
+\subsection{Sentence Repair}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/ladder.pdf}
+\caption{Sentence ROUGE-L of every repair setting, from copying to the fine-tuned editor.}
+\label{fig:ladder}
+\end{figure}
+
+Figure~\ref{fig:ladder} and, for the value-level scores, Figure~\ref{fig:values} in the appendix hold the sentence scores. Masks alone do little: without the infilling rules, linear masks leave the score at copy and attention masks move it by less than a hundredth, although the repair then changes 85\% of the sentences and writes the new value about as often as with the rules, because it changes many other words as well. The infilling rules of Section~\ref{sec:method} give most of the gain by leaving correct words alone, and the learned ranking over the same pools adds 0.016 more, so that the repair step closes 55\% of the gap between copying and the fine-tuned editor. The value-level scores show that the ranking's gain comes from choosing better among the same candidates: it keeps the old value half as often. With oracle masks the same repair step closes about half of the remaining gap to the editor on the 300-article sample, so the predicted masks are the largest single remaining cost. The verifier tells the same story on its own scale, where even the gold rewrite scores low (Table~\ref{tab:sentence} in the appendix): the repair step closes about two thirds of the gap in support between copying and the gold rewrite, and the editor nearly all of it, although the verifier is also the agreement term of the ranking, so the repair step's support is partly selected on it.
+
+The editor trains all of its 780M parameters, and its outputs are whole articles with no record of which tokens changed. Read without evidence, it copies every sentence and scores exactly as copy, so it too answers from the evidence and not from memory of the articles. Table~\ref{tab:matched} in the appendix compares the two systems when both are fit on the first 500 training articles. At that training size the editor did not learn to edit: it leaves almost every sentence unchanged and scores as copy, while the 500-article classifiers keep most of the gain of the full-data classifiers. It is one run per system with one seed on the 300-article sample.
+
+\subsection{Article Level}
+\label{sec:article}
+\begin{table*}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{7pt}
+\begin{tabular}{@{}llcccccc@{}}
+\toprule
+\textbf{Articles} & \textbf{System} & \textbf{Upd. R-L} & \textbf{Ent. P} & \textbf{Ent. R} & \keep{} \textbf{verb.} & \textbf{Unsupp.} $\downarrow$ & \textbf{Casc. R-L} \\
+\midrule
+\multirow{3}{*}{300 test} & Single round & 0.476 & 0.675 & 0.382 & 92.7\% & 0.19 & \\
+ & Consequence loop & 0.490 & 0.665 & 0.399 & 90.7\% & 0.20 & \\
+ & Flan-T5 editor & 0.911 & 0.915 & 0.885 & 97.9\% & 0.25 & \\
+\midrule
+\multirow{3}{*}{220 linked} & Single round & 0.436 & 0.866 & 0.330 & 92.9\% & 0.30 & 0.210 \\
+ & Consequence loop & 0.470 & 0.847 & 0.360 & 89.8\% & 0.35 & 0.296 \\
+ & Flan-T5 editor & 0.926 & 0.949 & 0.890 & 95.6\% & 0.98 & 0.815 \\
+\bottomrule
+\end{tabular}
+\caption{Article scores on a seeded sample of 300 test articles and on the 220 test articles with a cascade link. Ent. P and Ent. R are the precision and recall of the mentions of the changed sentences against the gold update, with precision averaged over the articles in which a system changed a sentence. Copy scores 0 UpdateROUGE-L, 100\% \keep{} verbatim and 0 unsupported mentions.}
+\label{tab:editor-article}
+\end{table*}
+
+Table~\ref{tab:editor-article} compares the loop with the editor on whole articles. The editor keeps more \keep{} sentences verbatim than the loop, with a paired difference whose 95\% bootstrap interval excludes zero, because it copies an unchanged sentence through a marker, while the sentence classifier labels 17\% of the \keep{} sentences \edit{} and the repair changes some of them. The editor also recovers far more of the gold update's mentions, where the loop recovers under half of them because it repairs only the sentences and spans its classifiers mark. On the general test articles the two systems add about the same number of mentions that neither the source nor the evidence holds, and the interval of that difference covers zero. On the articles with a cascade the editor adds almost three times as many such mentions as the loop, so its rewrites of cascade sentences bring in values that the evidence does not supply, which the loop's rejection rule forbids.
+
+\subsection{Cascades}
+\label{ssec:results_cascades}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/cascade.pdf}
+\caption{The loop on the 220 linked test articles: each detector's cascade ROUGE-L and its recall after an oracle repair, and the consequence loop after each round.}
+\label{fig:cascade}
+\end{figure*}
+
+Table~\ref{tab:cascade_results} and Figure~\ref{fig:cascade} hold the loop results. The single round has no detector, but the sentence classifier labels 53\% of the cascade sentences \edit{} in the first round and the repair changes 23\% of them, which is where its cascade score comes from. Every detector raises the score. The staleness delta flags few sentences. Edited as evidence flags most cascade sentences but also many \keep{} sentences, which costs verbatim retention. The consequence classifier has the highest detector recall at the smallest loss of retention. In the loop a further 23\% of the cascade sentences are repaired in the later rounds, so 76\% enter some round and 32\% are changed in the output, against 53\% and 23\% for the single round. The gold sentence labels include the cascade sentences, which are \edit{} in the gold update, so the last row of Table~\ref{tab:cascade_results} repairs 86\% of them in the first round and has no detector recall.
+
+The loop logs every edit with its round, so the article after each round can be rebuilt and scored (right panel of Figure~\ref{fig:cascade}). The second round, which touches about a third of the linked articles, gives the whole cascade gain, and the third round touches few articles, gains almost nothing, and costs a little retention, so two rounds would serve as well as three.
+
+\subsection{Attention over the Evidence}
+\label{sec:focus}
+For every token of a test \edit{} sentence whose new values occur in the evidence, 43,163 tokens in 915 articles, the attention weights of the staleness classifier were averaged over its four attention heads and split by whether the token is stale. Table~\ref{tab:focus} in the appendix holds the shares.
+
+A stale token places seven times the uniform share of its weight on the tokens of the value that replaces it, and its largest weight lies on such a token in 64\% of cases, against 23\% for a token that is not stale. The weight is most concentrated when the new value is a year and least when it is a multi-token name. On articles with more than one passage the weight falls mostly on the passage that holds the new value in three quarters of cases. The null slot receives no weight for either kind of token, so a token the evidence does not mention spreads its weight over the evidence instead.
+
+\section{Ablations}
+\label{sec:ablations}
+
+Table~\ref{tab:ablation-single} in the appendix changes one part of the repair step at a time.
+
+\paragraph{Masks}
+Oracle masks without evidence score below copy, because the sampler then fills the right positions from the model's memory of the real article, which the reversed data makes wrong.
+
+\paragraph{Infilling Rules}
+Removing the edit penalty, the rejection rule or the evidence veto lowers the sentence score, and the paired bootstrap interval of each difference excludes zero, so each of the three rules carries part of the gain. The intervals of the span cap and of the evidence-copy candidates cover zero on the sample. The learned ranking over the same pools gains more than any single rule. At the article level the rules trade coverage for precision: on the 901 articles they lower UpdateROUGE-L from 0.793 to 0.601, because the veto and the span cap leave more sentences unchanged, and cut the unsupported mentions per article from 1.02 to 0.26.
+
+\paragraph{Ranking}
+On the full test set the learned ranking's gain over the heuristic ranking is 0.016 with a 95\% paired interval of 0.013 to 0.020, and it holds under oracle masks on the 300-article sample.
+
+\paragraph{Stress Sets}
+The gain of the infilling rules depends on the two guarantees of the generator. On 200 validation articles with the passages that state the new value removed for half of the \edit{} sentences, the gain over copy falls to zero, and with one added passage per \edit{} sentence that mentions the old value in another context, the evidence veto unmasks the stale span and the setting scores below copy. The editor keeps about half of its gain on the missing-value set and most of it on the old-value set, because its fine-tuning covers sentences whose evidence is silent, so the two guarantees limit the infilling rules and not the task (Table~\ref{tab:matched} in the appendix).
+
+\section{Conclusion}
+DiffusEdit updates an article in place with 12.9M parameters of classifiers over a frozen masked diffusion model. The classifiers depend on the evidence, the repair step closes 55\% of the gap between copying and a fully fine-tuned editor, and it records every changed token. The consequence classifier brings half of the cascade sentences that the first round misses into a later round, and the attention weights of the staleness classifier fall on the evidence value that replaces a stale token for 64\% of the stale tokens. The editor keeps more untouched sentences verbatim and reaches higher update scores.
+
+\section{Limitations and Future Work}
+
+\paragraph{Evidence Completeness}
+The infilling rules rely on two guarantees of the synthetic generator, that every new value occurs in the evidence and that no old value does. Evidence retrieved from the web gives neither guarantee, so the evidence veto and the rejection rule need a replacement that tolerates a missing value or a stray old one before the method can run on retrieved passages.
+
+\paragraph{Synthetic Data}
+Every edit of Wiki Wrong replaces one value by another of the same type, the passages are written by a language model, and the gold updates are counterfactual by construction. Rewordings, edits that change meaning without changing a named value, and the noise of human revisions are absent, so a result on the benchmark does not transfer to real revision data until it is checked there. A hand-labelled set of real revisions with token-level stale spans would allow that check.
+
+\paragraph{Training Seeds}
+The repair and loop results come from one attention staleness classifier and one consequence classifier each, and the reported intervals reflect the sampling of test articles and not the training seed. The classifiers are cheap to retrain, so every pipeline result could be repeated over several seeds.
+
+\paragraph{Comparison with the Editor}
+The editor is fine-tuned on the full training split while the classifiers see the same articles only through cached states, so the two systems differ in architecture and in trained computation. The comparison bounds what a trained generator reaches on the data and is not a controlled ablation, and a comparison at several training-set sizes would separate the two effects.
+
+\paragraph{Ablation Coverage}
+The rule ablations run on a sample of the supported test articles and the loop ablations on a sample of the test articles, because a full test run of the repair step takes over two hours, so the smallest rule effects are not resolved. The full sets would resolve them.
+
+\paragraph{Frozen Infilling}
+The frozen model fills every mask with one token, so the length of an update is chosen from four fixed options and a candidate that needs a different length is never sampled. A diffusion model trained to grow or shrink a masked region would remove the length rule and the deletion margin.
+
+\bibliography{citations}
+
+\clearpage
+\appendix
+\raggedbottom
+
+\section{Full Tables}
+\label{sec:tables}
+\begin{table}[H]
+    \centering
+    \renewcommand{\arraystretch}{1.05}
+    {\footnotesize
+    \begin{tabular}{@{}>{\raggedright\arraybackslash}p{1.9cm}>{\raggedright\arraybackslash}p{1.5cm}>{\raggedright\arraybackslash}p{3.4cm}@{}}
+    \toprule
+    \textbf{Choice} & \textbf{Value} & \textbf{Reason} \\
+    \midrule
+    Classifier block & 24 of 32 & Higher validation macro-F1 than block 32. \\
+    \hline
+    Mask threshold $\tau$ & 0.85 & Set on validation. \\
+    \hline
+    Empty-mask fallback & top $1/5$ & We trust the classifier over the token scores. \\
+    \hline
+    Mask cap & $1/2$ of sentence & More than that is a rewrite, not a repair. \\
+    \hline
+    Candidate lengths & $0$, $\lceil n/2\rceil$, $n$, $n{+}2$ & Delete, shorten, keep, lengthen. \\
+    \hline
+    Edit penalty & 0.1 per word & Validation outputs showed the longest candidate chosen for 44\% of spans. \\
+    \hline
+    Rejection penalty & $-100$ & Large enough that a rejected candidate loses to any other. \\
+    \hline
+    Deletion margin & 0.1 & Removing a span removes the claim the verifier would check. \\
+    \hline
+    Span cap & $>2$ spans & Such masks were mostly wrong in validation. \\
+    \hline
+    Cascade threshold $\tau_c$ & 0.35 & Set on validation. \\
+    \hline
+    Rounds, re-mask cap & 3, 3 & Hard limits, so the loop always ends. \\
+    \hline
+    Sampler, copies & 8, 4 per span & Fixed defaults. \\
+    \bottomrule
+    \end{tabular}%
+    }
+    \caption{Fixed values of the method and the reason for each.}
+    \label{tab:choices}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{System} & \textbf{ROUGE-L} & \textbf{EM} & \textbf{New rec.} & \textbf{Old kept} $\downarrow$ & \textbf{Support} \\
+\midrule
+Copy & 0.875 & 0\% & 3\% & 100\% & 0.089 \\
+Attention masks, no infilling rules & 0.884 & 13\% & 44\% & 36\% & \\
+Infilling rules, heuristic ranking & 0.912 & 25\% & 40\% & 49\% & 0.180 \\
+Infilling rules, learned ranking & 0.929 & 32\% & 50\% & 26\% & 0.186 \\
+Flan-T5 editor & 0.973 & 77\% & 89\% & 10\% & 0.229 \\
+Gold rewrite & 1.000 & 100\% & 100\% & 0\% & 0.238 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Sentence scores on the 1,670 test \edit{} sentences of the supported articles: ROUGE-L, exact match, new-value recall, old values kept, and verifier support. The 95\% intervals of support are within $\pm 0.02$ of each mean.}
+\label{tab:sentence}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Setting} & \textbf{ROUGE-L} & \textbf{EM} & \textbf{Changed} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Fit on 500 training articles, 300 ablation articles}} \\
+Copy & 0.876 & 0\% & 0\% \\
+Classifiers, heuristic ranking & 0.908 & 24\% & 58\% \\
+Classifiers, refit learned ranking & 0.917 & 29\% & 72\% \\
+Flan-T5 editor & 0.875 & 2\% & 4\% \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Fit on all training articles, same 300 articles}} \\
+Classifiers, learned ranking & 0.930 & 33\% & 83\% \\
+Flan-T5 editor & 0.979 & 76\% & 93\% \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Missing-value stress set, 200 validation articles}} \\
+Copy & 0.882 & 0\% & 0\% \\
+Without infilling rules & 0.827 & 5\% & 81\% \\
+With infilling rules & 0.883 & 9\% & 41\% \\
+Flan-T5 editor & 0.926 & 38\% & 47\% \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Old-value stress set, 200 validation articles}} \\
+Copy & 0.882 & 0\% & 0\% \\
+Without infilling rules & 0.878 & 13\% & 80\% \\
+With infilling rules & 0.878 & 0\% & 9\% \\
+Flan-T5 editor & 0.951 & 61\% & 86\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Sentence scores of the matched-budget comparison and of the stress sets. In the matched comparison the editor uses the validation split for early stopping and the classifiers a reranker refit on validation pools of the 500-article staleness classifier. Changed is the share of \edit{} sentences whose output differs from the source.}
+\label{tab:matched}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/values.pdf}
+\caption{Value-level scores on the supported test \edit{} sentences: exact match, new-value recall and old values kept.}
+\label{fig:values}
+\end{figure*}
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Detector} & \textbf{Casc. R-L} & \textbf{Casc. recall} & \textbf{Upd. R-L} & \keep{} \textbf{verb.} \\
+\midrule
+Single round & 0.210 & & 0.436 & 92.9\% \\
+Staleness delta & 0.270 & 13.8\% & 0.448 & 86.7\% \\
+Edited as evidence & 0.276 & 72.0\% & 0.476 & 84.0\% \\
+Consequence loop & 0.296 & 79.3\% & 0.470 & 89.8\% \\
+\midrule
+Consequence loop, gold labels & 0.339 & & 0.514 & 100.0\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{The loop with each cascade detector on the 220 linked test articles. The single round has no detector, and the gold labels include the cascade sentences, so neither row has a detector recall.}
+\label{tab:cascade_results}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrcccc@{}}
+\toprule
+\textbf{Tokens} & \textbf{Count} & \textbf{On new value} & \textbf{Uniform} & \textbf{Top token} & \textbf{Top passage} \\
+\midrule
+Stale & 5,284 & 0.395 & 0.055 & 63.9\% & 76.3\% \\
+\quad new value a year & 1,220 & 0.443 & 0.055 & 81.6\% & \\
+\quad new value a number & 355 & 0.421 & 0.048 & 73.5\% & \\
+\quad new value a name & 3,709 & 0.377 & 0.056 & 57.1\% & \\
+Not stale & 37,879 & 0.138 & 0.040 & 22.7\% & 53.5\% \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Where the attention weight of the staleness classifier falls on the test split. On new value is the share of weight on the tokens of the gold new value, Uniform the share those tokens hold among the evidence tokens, Top token the share of tokens whose largest weight is on a new-value token, and Top passage the share whose most weighted passage holds the new value.}
+\label{tab:focus}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llcc@{}}
+\toprule
+\textbf{Axis} & \textbf{Run} & \textbf{ROUGE-L} & \textbf{Difference to copy} \\
+\midrule
+\multirow{4}{*}{Masks}
+  & Oracle masks, no infilling rules & 0.912 & $+0.037$ \\
+  & Oracle masks, no infilling rules, no evidence & 0.854 & $-0.021$ \\
+  & Linear masks, no infilling rules & 0.876 & $+0.001$ \\
+  & Attention masks, no infilling rules & 0.884 & $+0.009$ \\
+\midrule
+\multirow{3}{*}{Ranking}
+  & Infilling rules, heuristic ranking & 0.912 & $+0.038$ \\
+  & Infilling rules, learned ranking & 0.929 & $+0.054$ \\
+  & Flan-T5 editor & 0.973 & $+0.098$ \\
+\midrule
+\multirow{6}{*}{Infilling rules}
+  & No edit penalty & & $-0.008$ \\
+  & No rejection rule & & $-0.005$ \\
+  & No span cap & & $-0.000$ \\
+  & No evidence veto & & $-0.002$ \\
+  & No evidence-copy candidates & & $-0.004$ \\
+  & All infilling rules, learned ranking & & $+0.012$ \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Single-round ablations. The mask and ranking rows are scored on the 1,670 supported test \edit{} sentences, with the difference to copy. The infilling-rule rows remove one rule at a time on the 300-article sample, with the difference to the setting that has all of them.}
+\label{tab:ablation-single}
+\end{table}
+
+\section{Compute}
+Every run used one NVIDIA A100 with 40~GB of memory, rented by the hour, because LLaDA-8B-Base in bfloat16 holds 16~GB of weights and the cache of hidden states that the classifiers train on is over 100~GB, above the storage quota of the shared cluster available to the authors. The cache is written once, at about 28 articles per second, and memory-mapped afterwards, so a classifier trains in minutes. The GPU grant was INR 5,880, about 70 A100 hours. A full repair run over the 901 supported test articles takes over two hours, so each configuration was scored once on test and the ablations ran on samples of 300 articles.
+
+\end{document}

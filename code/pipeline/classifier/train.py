@@ -1,4 +1,4 @@
-"""Train the sentence classifier head on cached features (Eqs. 5 and 6).
+"""Train the sentence classifier on cached features.
 
 The head is one linear layer from the pooled vector u_j to KEEP/EDIT/DROP
 logits. The loss is cross-entropy with class weights w_c = N / (3 N_c) from

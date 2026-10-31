@@ -11,3 +11,5 @@
 !progress/figures/*.pdf
 
 !experiments/synthetic/figures/*.pdf
+
+!evaluation/figures/*.pdf

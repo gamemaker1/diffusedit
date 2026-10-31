@@ -19,8 +19,8 @@ palette with a darker stroke of each hue for edges and lines.
     differences.pdf    paired differences with 95% intervals
 
 Usage:
-    python -m analysis.progress_figures --data ../datasets/collated/train.jsonl \\
-        --datasets ../datasets --outputs outputs/jl --out ../../docs/internal/progress/figures
+    python -m analysis.progress_figures --data ../dataset/collated/train.jsonl \\
+        --datasets ../dataset --outputs outputs/jl --out ../../docs/internal/progress/figures
 """
 
 import argparse

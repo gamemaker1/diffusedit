@@ -1,0 +1,12 @@
+# Data stays out of git. Only the scripts, the writer brief and the notes are tracked.
+**
+!.gitignore
+!*.py
+!*.md
+!mutators/
+!mutators/*.py
+!fruit/
+!fruit/*.py
+!fruit/audit/
+!fruit/audit/*.py
+!fruit/audit/*.md

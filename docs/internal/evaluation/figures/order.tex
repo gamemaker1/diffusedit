@@ -1,0 +1,25 @@
+\begin{tikzpicture}[
+  node distance=5mm and 9mm,
+  box/.style={draw, rounded corners=2pt, align=center, font=\scriptsize, minimum height=9mm, text width=22mm, inner sep=2pt},
+  gate/.style={draw, diamond, aspect=2.2, align=center, font=\scriptsize, inner sep=1pt, fill=black!8},
+  arr/.style={-{Stealth[length=1.8mm]}, thick}]
+\node[box] (heads) {Heads fit on train,\\ tuned on val};
+\node[box, right=of heads] (fix) {Single round on test:\\ oracle, linear,\\ \run{fix-attention}};
+\node[gate, right=of fix] (g1) {Gate 1};
+\node[box, below=7mm of g1] (grid) {Val grid on 200\\ articles, failures\\ read, rules added};
+\node[box, left=of grid] (fresh) {Base, v1, v2 on\\ 200 other val\\ articles: v2};
+\node[box, left=of fresh] (tuned) {\run{fix-tuned}\\ on test};
+\node[gate, below=7mm of tuned] (g1b) {Gate 1};
+\node[box, right=of g1b] (loops) {Four loops on\\ 220 linked\\ test articles};
+\node[gate, right=of loops] (g2) {Gate 2};
+\node[box, right=of g2] (rest) {Ablations, loop\\ sample, stress sets,\\ editor};
+\draw[arr] (heads) -- (fix);
+\draw[arr] (fix) -- (g1);
+\draw[arr] (g1) -- node[right, font=\scriptsize] {fail} (grid);
+\draw[arr] (grid) -- (fresh);
+\draw[arr] (fresh) -- (tuned);
+\draw[arr] (tuned) -- (g1b);
+\draw[arr] (g1b) -- node[above, font=\scriptsize] {pass} (loops);
+\draw[arr] (loops) -- (g2);
+\draw[arr] (g2) -- node[above, font=\scriptsize] {pass} (rest);
+\end{tikzpicture}

@@ -15,7 +15,7 @@ This script keeps the gold rewrites and rebuilds the rest:
 
     corruption  Each EDIT source is made again from its gold rewrite. One to
                 three entities (spaCy en_core_web_sm, the types of
-                datasets/collate.py) are replaced by an entity of the same
+                dataset/fruit/collate.py) are replaced by an entity of the same
                 type, word count and digit use drawn from the other gold rewrites. Years and integers
                 move to a nearby year or an integer of the same length. A
                 rewrite with no entity becomes KEEP.

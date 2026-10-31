@@ -1,4 +1,4 @@
-"""Cascade recall of one detector after an oracle repair of the direct edits (Section 9.2).
+"""Cascade recall of one detector after an oracle repair of the direct edits.
 
 The evaluation simulates one round of Algorithm 1. The round repairs the
 direct edits of each article with their gold rewrites and nothing else, so Δ
@@ -38,9 +38,9 @@ false flag. Every cascade of a synthetic record is a recorded link, so no
 flagged sentence is a cascade without a label.
 
 Usage:
-    python -m cascading.evaluate --data ../datasets/synthetic/cascades.jsonl \\
+    python -m cascading.evaluate --data ../dataset/cascades.jsonl \\
         --labels pairs/synthetic/labels.jsonl --detector mention --out eval/mention.json
-    python -m cascading.evaluate --data ../datasets/synthetic/cascades.jsonl \\
+    python -m cascading.evaluate --data ../dataset/cascades.jsonl \\
         --labels pairs/synthetic/labels.jsonl --detector consequence \\
         --features features/cascades --features-after features/cascades-after \\
         --cascade-head heads/cascade --out eval/consequence.json
@@ -142,8 +142,10 @@ def main():
     if missing:
         parser.error(f"--detector {args.detector} needs {' '.join(missing)}")
 
-    import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
+    if args.detector != "mention":
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     detector, layer, classifier = build(args, device)
     before = Rows(args.features, layer) if args.features and layer else None
     after = Rows(args.features_after, layer) if args.features_after and layer else None

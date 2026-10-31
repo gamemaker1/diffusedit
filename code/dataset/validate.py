@@ -7,7 +7,7 @@ Verifies:
 4. Label distribution statistics (KEEP / EDIT / DROP ratios).
 
 Usage:
-    python -m code.synthetic.validate datasets/synthetic/train.jsonl [--check-tokens]
+    python -m dataset.validate dataset/split/train.jsonl [--check-tokens]
 """
 
 import argparse

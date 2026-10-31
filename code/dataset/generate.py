@@ -7,17 +7,17 @@ Features:
 - Entity swaps drawn from the seed corpus itself, of the same type and shape,
   often from the same article, and number and date changes of varied size.
 - One to three changed spans per EDIT sentence, and per-article edit rates.
-- Cascading edits (s_j -> s_k) of the kinds in synthetic/mutators/cascades.py,
+- Cascading edits (s_j -> s_k) of the kinds in dataset/mutators/cascades.py,
   with evidence for s_j only. Each link records its kind.
-- Evidence in varied forms (synthetic/evidence.py): restatements, excerpts,
+- Evidence in varied forms (dataset/evidence.py): restatements, excerpts,
   fact-sheet fields, retractions, confirmations of KEEP sentences in the same
   frames, and snippets from other articles.
 - Pristine KEEP sentences with zero stylistic changes.
 - Direct JSONL output matching classifier.inputs.build() requirements.
 
 Usage:
-    python -m synthetic.generate --seed-file datasets/synthetic/split/train.jsonl --n 5000 \
-        --cascade-prob 1.0 --prefix cascade- --out datasets/synthetic/cascade/source.jsonl
+    python -m dataset.generate --seed-file dataset/split/train.jsonl --n 5000 \
+        --cascade-prob 1.0 --prefix cascade- --out dataset/cascade/source.jsonl
 """
 
 import argparse
@@ -41,8 +41,8 @@ try:
     from .schema import EvidenceSnippet, SentenceLabel, SyntheticRecord, write_jsonl
 except ImportError:
     from evidence import Writer
-    from mutators import CascadeMutator, EntityMutator, NumberMutator
-    from mutators.entities import EntityBank, apply
+    from dataset.mutators import CascadeMutator, EntityMutator, NumberMutator
+    from dataset.mutators.entities import EntityBank, apply
     from schema import EvidenceSnippet, SentenceLabel, SyntheticRecord, write_jsonl
 
 
